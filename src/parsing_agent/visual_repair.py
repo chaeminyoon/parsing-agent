@@ -1642,12 +1642,19 @@ class OpenAIVisualTableRecoverer:
         if page_number is None:
             return None
         image_url, crop = self._render_table_region_data_url(pdf_path, page_number, table_label)
+        normalized_issue_types = tuple(issue_types)
+        continuation_urls = (
+            self._render_continuation_data_urls(pdf_path, page_number)
+            if "split_multipage_table" in normalized_issue_types
+            else []
+        )
         prompt = self._build_prompt(
             table_label,
             page_number,
             candidate_text,
-            issue_types=issue_types,
+            issue_types=normalized_issue_types,
             preferred_output_format=preferred_output_format,
+            continuation_page_count=len(continuation_urls),
         )
         response_payload = _post_response(
             url=f"{self._base_url}/responses",
@@ -1660,6 +1667,10 @@ class OpenAIVisualTableRecoverer:
                         "content": [
                             {"type": "input_text", "text": prompt},
                             {"type": "input_image", "image_url": image_url, "detail": "high"},
+                        ]
+                        + [
+                            {"type": "input_image", "image_url": continuation_url, "detail": "high"}
+                            for continuation_url in continuation_urls
                         ],
                     }
                 ],
@@ -1693,6 +1704,7 @@ class OpenAIVisualTableRecoverer:
         *,
         issue_types: Iterable[str] = (),
         preferred_output_format: str = "markdown",
+        continuation_page_count: int = 0,
     ) -> str:
         excerpt = _candidate_excerpt(candidate_text, table_label)
         target_descriptor = table_label
@@ -1702,9 +1714,17 @@ class OpenAIVisualTableRecoverer:
         rendered_issue_types = ", ".join(normalized_issue_types) if normalized_issue_types else "none provided"
         issue_guidance = _issue_specific_prompt_guidance(normalized_issue_types, preferred_output_format)
         issue_guidance_block = "\n".join(f"- {line}" for line in issue_guidance) or "- No extra issue-specific guidance."
+        continuation_note = ""
+        if continuation_page_count:
+            continuation_note = (
+                f"The table continues onto the next page. {continuation_page_count} additional image(s) after "
+                "the first show the top of the following page(s) — merge all parts into ONE table, do not repeat "
+                "the header rows from continuation pages.\n"
+            )
         return (
             f"Target table label: {target_descriptor}\n"
-            f"Source page number: {page_number}\n\n"
+            f"Source page number: {page_number}\n"
+            f"{continuation_note}\n"
             f"Known table issues: {rendered_issue_types}\n"
             f"Preferred output format: {preferred_output_format}\n\n"
             f"Issue-specific repair guidance:\n{issue_guidance_block}\n\n"
@@ -1726,6 +1746,26 @@ class OpenAIVisualTableRecoverer:
                 if any(variant in page_text for variant in target_variants):
                     return page_index + 1
         return None
+
+    def _render_continuation_data_urls(self, pdf_path: Path, page_number: int, max_pages: int = 1) -> list[str]:
+        """다중 페이지 표의 이어지는 페이지 상단(60%)을 렌더링한다.
+
+        split_multipage_table 이슈에서 첫 페이지 crop만 보내면 vision 모델이
+        표의 뒷부분을 아예 못 보고 재구성하게 된다. 이어지는 페이지의 표는
+        관례상 페이지 상단에 위치하므로 상단 60%를 함께 보낸다.
+        """
+        urls: list[str] = []
+        with fitz.open(pdf_path) as document:
+            for offset in range(1, max_pages + 1):
+                page_index = page_number - 1 + offset
+                if page_index >= document.page_count:
+                    break
+                page = document.load_page(page_index)
+                clip = fitz.Rect(0.0, 0.0, page.rect.width, page.rect.height * 0.6)
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.25, 1.25), clip=clip, alpha=False)
+                encoded = base64.b64encode(pixmap.tobytes("png")).decode("ascii")
+                urls.append(f"data:image/png;base64,{encoded}")
+        return urls
 
     def _render_table_region_data_url(self, pdf_path: Path, page_number: int, table_label: str) -> tuple[str, TableCrop]:
         with fitz.open(pdf_path) as document:
@@ -1774,9 +1814,11 @@ class OpenAIVisualTableRecoverer:
                 bbox=self._rect_tuple(table_rect),
             )
         if label_anchor is not None:
+            # 표 감지가 실패한 경우 표의 실제 높이를 모른다. 고정 높이(420px)로
+            # 자르면 긴 표의 아래쪽이 잘려나가므로, 라벨부터 페이지 끝까지 잡는다 —
+            # 이미지가 커지는 비용이 표가 잘리는 비용보다 싸다.
             top = max(0.0, label_anchor.y0 - 24.0)
-            bottom = min(page.rect.height, top + max(420.0, page.rect.height * 0.55))
-            clip = fitz.Rect(0.0, top, page.rect.width, bottom)
+            clip = fitz.Rect(0.0, top, page.rect.width, page.rect.height)
             return TableCrop(
                 page_number=page_number,
                 clip=clip,
