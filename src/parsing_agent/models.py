@@ -41,6 +41,21 @@ class ParseCandidate:
 
 
 @dataclass(slots=True)
+class EvaluationIssue:
+    issue_type: str
+    metric_name: str
+    severity: str
+    confidence: float
+    description: str
+    source_excerpt: str | None = None
+    candidate_excerpt: str | None = None
+    page_number: int | None = None
+    table_label: str | None = None
+    bbox: list[float] | None = None
+    repairability: str | None = None
+
+
+@dataclass(slots=True)
 class EvaluationMetrics:
     text_coverage: float
     normalized_similarity: float
@@ -53,6 +68,7 @@ class EvaluationMetrics:
     llm_judge_score: float | None = None
     judge_result: JudgeResult | None = None
     notes: list[str] = field(default_factory=list)
+    issues: list[EvaluationIssue] = field(default_factory=list)
 
 
 @dataclass(slots=True)

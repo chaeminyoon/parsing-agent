@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from parsing_agent.evaluation import TABLE_ISSUE_MERGED_CELL_LOSS, TABLE_ISSUE_MISSING_HEADER
+from parsing_agent.evaluation import (
+    TABLE_ISSUE_MERGED_CELL_LOSS,
+    TABLE_ISSUE_MISSING_HEADER,
+    TABLE_ISSUE_NUMERIC_TOKEN_BREAK,
+)
 from parsing_agent.models import DocumentSource, EvaluationMetrics, JudgeResult, ParseCandidate, RepairAction
 from parsing_agent.repair import HeuristicRepairer, RepairTarget
 import fitz
@@ -153,6 +157,41 @@ def test_repairer_recovers_missing_structured_source_lines_when_text_coverage_is
     assert "1. 사업개요" in repaired.content
     assert "표 4.2-2 총괄" in repaired.content
     assert any(action.route_name == "recover_missing_source_lines" for action in actions)
+
+
+def test_repairer_recovers_missing_table_caption_with_specific_route() -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="run-caption-repair",
+        extracted_text=(
+            "개요 본문\n"
+            "표 4.2-2 총괄\n"
+            "세부 내용\n"
+        ),
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.95,
+        normalized_similarity=0.8,
+        structure_retention=0.8,
+        table_preservation=0.8,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+    )
+    candidate = ParseCandidate(
+        parser_name="mock",
+        content="개요 본문\n세부 내용\n",
+        format_name="md",
+        source_path=source.path,
+    )
+
+    repaired, actions = HeuristicRepairer().repair_heuristics(source, candidate, metrics)
+
+    assert "표 4.2-2 총괄" in repaired.content
+    assert any(action.issue_type == "missing_table_caption" for action in actions)
+    assert any(action.route_name == "recover_missing_table_captions" for action in actions)
 
 
 def test_repairer_removes_repeated_pdf_headers_and_footers() -> None:
@@ -1218,6 +1257,50 @@ def test_direct_visual_repair_page_scoped_task_uses_page_replacement_fallback(mo
     assert "| new | table |" in updated
     assert "alpha  10  20" not in updated
     assert len(actions) == 1
+
+
+def test_chunk_visual_repair_rejects_numeric_issue_without_numbers() -> None:
+    class _Recoverer:
+        def recover_task(self, source, content, task):
+            del source, content
+            return VisualTableRecovery(
+                table_label=task.table_label,
+                page_number=task.page_number,
+                confidence=0.95,
+                markdown="| 항목 | 값 |\n| --- | --- |\n| 내용 | 없음 |",
+                notes=[],
+                crop_method="table-bbox",
+                bbox=None,
+            )
+
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="run-visual-sanity",
+        extracted_text="source text",
+        page_count=1,
+    )
+    candidate = ParseCandidate(
+        parser_name="mock",
+        content="표 4.2-2\nbroken numeric table\n",
+        format_name="md",
+        source_path=source.path,
+    )
+    task = VisualRepairTask(
+        task_id="numeric-table",
+        table_label="표 4.2-2",
+        page_number=1,
+        issue_types=(TABLE_ISSUE_NUMERIC_TOKEN_BREAK,),
+    )
+
+    result = HeuristicRepairer(visual_table_recoverer=_Recoverer()).apply_chunk_repair(
+        source,
+        candidate,
+        task,
+    )
+
+    assert result is None
 
 
 def test_direct_visual_repair_uses_candidate_metadata_for_html_preference(monkeypatch) -> None:

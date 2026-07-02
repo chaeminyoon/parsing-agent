@@ -9,6 +9,7 @@ from parsing_agent.config import WorkflowConfig, WorkflowWeights
 from parsing_agent.interfaces import CandidateEvaluator, CandidateJudge
 from parsing_agent.models import (
     DocumentSource,
+    EvaluationIssue,
     EvaluationMetrics,
     JudgeResult,
     ParseCandidate,
@@ -749,6 +750,161 @@ def _coerce_judge_result(raw_result: Any) -> JudgeResult:
     )
 
 
+def _issue_severity(score: float, *, high_below: float = 0.55, medium_below: float = 0.75) -> str:
+    if score < high_below:
+        return "high"
+    if score < medium_below:
+        return "medium"
+    return "low"
+
+
+def _excerpt_for_issue(text: str, limit: int = 240) -> str | None:
+    stripped = " ".join(text.split())
+    if not stripped:
+        return None
+    if len(stripped) <= limit:
+        return stripped
+    return f"{stripped[: limit - 3]}..."
+
+
+def _metric_confidence(score: float) -> float:
+    return _clamp(1.0 - score)
+
+
+def _build_metric_issues(
+    *,
+    source_text: str,
+    candidate_text: str,
+    metrics: EvaluationMetrics,
+) -> list[EvaluationIssue]:
+    issues: list[EvaluationIssue] = []
+    source_excerpt = _excerpt_for_issue(source_text)
+    candidate_excerpt = _excerpt_for_issue(candidate_text)
+
+    if metrics.text_coverage < 0.75:
+        issues.append(
+            EvaluationIssue(
+                issue_type="text_coverage_missing_lines",
+                metric_name="text_coverage",
+                severity=_issue_severity(metrics.text_coverage),
+                confidence=_metric_confidence(metrics.text_coverage),
+                description="Candidate is missing source text tokens or structured lines.",
+                source_excerpt=source_excerpt,
+                candidate_excerpt=candidate_excerpt,
+                repairability="heuristic",
+            )
+        )
+    if metrics.structure_retention < 0.75:
+        issues.append(
+            EvaluationIssue(
+                issue_type="structure_heading_noise",
+                metric_name="structure_retention",
+                severity=_issue_severity(metrics.structure_retention),
+                confidence=_metric_confidence(metrics.structure_retention),
+                description="Candidate structure markers differ from the source.",
+                source_excerpt=source_excerpt,
+                candidate_excerpt=candidate_excerpt,
+                repairability="heuristic",
+            )
+        )
+    if metrics.table_preservation < 0.75:
+        issues.append(
+            EvaluationIssue(
+                issue_type="table_layout_noise",
+                metric_name="table_preservation",
+                severity=_issue_severity(metrics.table_preservation),
+                confidence=_metric_confidence(metrics.table_preservation),
+                description="Candidate table structure appears incomplete or damaged.",
+                source_excerpt=source_excerpt,
+                candidate_excerpt=candidate_excerpt,
+                repairability="visual",
+            )
+        )
+    if metrics.empty_block_penalty > 0:
+        issues.append(
+            EvaluationIssue(
+                issue_type="blank_line_noise",
+                metric_name="empty_block_penalty",
+                severity="medium" if metrics.empty_block_penalty >= 0.1 else "low",
+                confidence=_clamp(metrics.empty_block_penalty),
+                description="Candidate contains oversized blank-line runs.",
+                candidate_excerpt=candidate_excerpt,
+                repairability="heuristic",
+            )
+        )
+    if metrics.repetition_penalty > 0:
+        issues.append(
+            EvaluationIssue(
+                issue_type="line_repetition_noise",
+                metric_name="repetition_penalty",
+                severity="medium" if metrics.repetition_penalty >= 0.1 else "low",
+                confidence=_clamp(metrics.repetition_penalty),
+                description="Candidate contains repeated non-empty lines.",
+                candidate_excerpt=candidate_excerpt,
+                repairability="heuristic",
+            )
+        )
+    return issues
+
+
+def _build_table_finding_issues(
+    *,
+    candidate_text: str,
+    judge_result: JudgeResult | None,
+    table_issues: list[str],
+) -> list[EvaluationIssue]:
+    issues: list[EvaluationIssue] = []
+    candidate_excerpt = _excerpt_for_issue(candidate_text)
+    seen: set[tuple[str, str | None, int | None]] = set()
+
+    if judge_result is not None:
+        for finding in judge_result.table_findings:
+            issue_type = str(finding.get("issue_type") or "").strip()
+            if not issue_type:
+                continue
+            table_label = finding.get("table_label")
+            page_number = finding.get("page_number")
+            key = (
+                issue_type,
+                table_label if isinstance(table_label, str) else None,
+                page_number if isinstance(page_number, int) else None,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append(
+                EvaluationIssue(
+                    issue_type=issue_type,
+                    metric_name="table_preservation",
+                    severity="high",
+                    confidence=0.85,
+                    description=f"Judge identified table issue: {issue_type}.",
+                    candidate_excerpt=candidate_excerpt,
+                    page_number=key[2],
+                    table_label=key[1],
+                    repairability="visual",
+                )
+            )
+
+    for issue_type in table_issues:
+        key = (issue_type, None, None)
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append(
+            EvaluationIssue(
+                issue_type=issue_type,
+                metric_name="table_preservation",
+                severity="medium",
+                confidence=0.65,
+                description=f"Table issue detected by deterministic evidence: {issue_type}.",
+                candidate_excerpt=candidate_excerpt,
+                repairability="visual",
+            )
+        )
+    return issues
+
+
 class DeterministicEvaluator(CandidateEvaluator):
     def __init__(self, config: WorkflowConfig, judge: CandidateJudge | None = None) -> None:
         self._config = config
@@ -780,6 +936,13 @@ class DeterministicEvaluator(CandidateEvaluator):
         )
         metrics.notes.extend(_build_notes(metrics))
         metrics.table_issues = classify_table_issues(source, candidate, None)
+        metrics.issues.extend(
+            _build_metric_issues(
+                source_text=source_text,
+                candidate_text=candidate_text,
+                metrics=metrics,
+            )
+        )
         if self._judge is not None:
             judge_result = _coerce_judge_result(self._judge.judge(source, candidate, metrics))
             metrics.judge_result = judge_result
@@ -789,5 +952,20 @@ class DeterministicEvaluator(CandidateEvaluator):
             metrics.notes.extend(f"Judge issue: {issue}" for issue in judge_result.issues)
             if metrics.table_issues:
                 metrics.notes.append(f"Table issues: {', '.join(metrics.table_issues)}")
+            metrics.issues.extend(
+                _build_table_finding_issues(
+                    candidate_text=candidate_text,
+                    judge_result=judge_result,
+                    table_issues=metrics.table_issues,
+                )
+            )
+        elif metrics.table_issues:
+            metrics.issues.extend(
+                _build_table_finding_issues(
+                    candidate_text=candidate_text,
+                    judge_result=None,
+                    table_issues=metrics.table_issues,
+                )
+            )
         metrics.total_score = aggregate_score(metrics, self._config.weights, self._config.judge_weight)
         return metrics

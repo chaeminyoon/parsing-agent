@@ -7,6 +7,7 @@ from parsing_agent.evaluation import TABLE_ISSUE_MERGED_CELL_LOSS, TABLE_ISSUE_M
 from parsing_agent.interfaces import CandidateEvaluator, CandidateRepairer
 from parsing_agent.models import (
     DocumentSource,
+    EvaluationIssue,
     EvaluationMetrics,
     JudgeResult,
     ParseCandidate,
@@ -17,7 +18,7 @@ from parsing_agent.parsers import OpenDataLoaderPdfParserAdapter, build_default_
 from parsing_agent.repair import HeuristicRepairer, identify_repair_targets
 from parsing_agent.visual_repair import OpenAIVisualTableRecoverer, VisualRepairTask
 from parsing_agent.repair import RepairTarget
-from parsing_agent.workflow import WorkflowRunner, WorkflowState
+from parsing_agent.workflow import RepairOutcome, WorkflowRunner, WorkflowState
 
 _PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WnR6zsAAAAASUVORK5CYII="
@@ -564,6 +565,54 @@ def test_inspect_preserves_structured_table_finding_payload_in_repair_targets() 
     assert table_targets[0].source_name == "judge_table_finding"
 
 
+def test_inspect_targets_include_metric_evidence_and_repair_estimates() -> None:
+    source = DocumentSource(
+        path=Path("sample.md"),
+        media_type="text/markdown",
+        size_bytes=0,
+        run_id="inspect-evidence-targets",
+        extracted_text="# Source title\nbody",
+    )
+    candidate = ParseCandidate(
+        parser_name="text-fallback",
+        content="# Broken\n# Broken\nbody",
+        format_name="md",
+        source_path=source.path,
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.9,
+        normalized_similarity=0.8,
+        structure_retention=0.4,
+        table_preservation=0.9,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+        issues=[
+            EvaluationIssue(
+                issue_type="structure_heading_noise",
+                metric_name="structure_retention",
+                severity="high",
+                confidence=0.82,
+                description="heading duplicated",
+                source_excerpt="# Source title",
+                candidate_excerpt="# Broken # Broken",
+                repairability="heuristic",
+            )
+        ],
+    )
+
+    targets = identify_repair_targets(source, candidate, metrics)
+
+    structure_target = next(target for target in targets if target.issue_type == "structure_heading_noise")
+    assert structure_target.severity == "high"
+    assert structure_target.confidence == 0.82
+    assert structure_target.source_excerpt == "# Source title"
+    assert structure_target.candidate_excerpt == "# Broken # Broken"
+    assert structure_target.repairability == "heuristic"
+    assert structure_target.expected_gain > 0
+    assert structure_target.estimated_cost == 0.0
+
+
 def test_inspect_synthesizes_table_targets_from_parser_metadata_when_judge_findings_are_missing() -> None:
     source = DocumentSource(
         path=Path("sample.pdf"),
@@ -627,6 +676,70 @@ def test_route_repair_strategy_preserves_structured_visual_target_payload() -> N
     assert plan[0].targets[0].table_label == "표 4.2-2"
     assert plan[0].targets[0].page_number == 4
     assert plan[0].targets[0].source_name == "judge_table_finding"
+    assert plan[0].expected_gain > 0
+    assert plan[0].estimated_cost > 0
+    assert plan[0].verification_rule == "table_preservation_or_score_improves"
+    assert result["repair_plan_history"][0]["steps"][0]["targets"][0]["table_label"] == "표 4.2-2"
+
+
+def test_route_repair_strategy_records_skipped_low_value_visual_repairs() -> None:
+    runner = WorkflowRunner(config=WorkflowConfig(judge_weight=0, langsmith_tracing=False))
+
+    result = runner._route_repair_strategy_node(
+        {
+            "repair_targets": [
+                RepairTarget(
+                    target_kind="table",
+                    issue_type=TABLE_ISSUE_MISSING_HEADER,
+                    route_name="recover_tables_from_pdf_image",
+                    description="recover table",
+                    expected_gain=0.01,
+                    estimated_cost=1.0,
+                    risk_level="medium",
+                ),
+            ]
+        }
+    )
+
+    assert result["repair_plan"] == []
+    skipped_step = result["repair_plan_history"][0]["steps"][0]
+    assert skipped_step["skip_reason"] == "expected_gain_below_cost_gate"
+    assert skipped_step["estimated_cost"] == 1.0
+
+
+def test_repair_outcomes_are_verified_against_post_repair_metrics() -> None:
+    runner = WorkflowRunner(config=WorkflowConfig(judge_weight=0, langsmith_tracing=False))
+    outcome = RepairOutcome(
+        action_name="recover_table_from_pdf_image",
+        issue_type=TABLE_ISSUE_MISSING_HEADER,
+        route_name="recover_tables_from_pdf_image",
+        verification_rule="table_preservation_or_score_improves",
+        before_score=0.4,
+        before_metrics={
+            "text_coverage": 0.8,
+            "normalized_similarity": 0.8,
+            "structure_retention": 0.8,
+            "table_preservation": 0.3,
+            "empty_block_penalty": 0.0,
+            "repetition_penalty": 0.0,
+            "total_score": 0.4,
+        },
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.8,
+        normalized_similarity=0.8,
+        structure_retention=0.8,
+        table_preservation=0.55,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.52,
+    )
+
+    verified = runner._verify_repair_outcomes(outcomes=[outcome], metrics=metrics)
+
+    assert verified[0].verification_passed is True
+    assert verified[0].score_delta == 0.12
+    assert verified[0].changed_metrics["table_preservation"] == 0.25
 
 
 def test_route_prioritizes_visual_repair_after_stalled_snapshot_delta() -> None:
@@ -952,6 +1065,10 @@ def test_finalize_output_does_not_mutate_candidate_content() -> None:
         }
     )
     assert state["result"].best_candidate.content == candidate.content
+    assert state["result"].report["diagnosed_issues"] == []
+    assert state["result"].report["repair_plan"] == []
+    assert state["result"].report["repair_outcomes"] == []
+    assert state["result"].report["skipped_repairs"] == []
 
 
 def test_externalize_source_text_keeps_it_out_of_graph_state() -> None:

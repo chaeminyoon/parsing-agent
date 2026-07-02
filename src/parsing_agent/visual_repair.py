@@ -806,6 +806,45 @@ def _normalize_recovered_table_markup(markup: str) -> str:
     return normalized.strip()
 
 
+def _looks_like_recovered_table(markup: str) -> bool:
+    stripped = markup.strip()
+    if not stripped:
+        return False
+    if "<table" in stripped.lower() and "</table>" in stripped.lower():
+        return True
+    table_rows = [
+        line
+        for line in stripped.splitlines()
+        if line.strip().startswith("|") and line.strip().endswith("|")
+    ]
+    if len(table_rows) < 2:
+        return False
+    return any(
+        set(cell.strip()) <= {":", "-"} and cell.strip()
+        for cell in table_rows[1].split("|")
+        if cell.strip()
+    )
+
+
+def _recovered_table_passes_sanity(
+    *,
+    recovered_markdown: str,
+    issue_types: tuple[str, ...] | list[str],
+) -> bool:
+    if not _looks_like_recovered_table(recovered_markdown):
+        return False
+    if TABLE_ISSUE_NUMERIC_TOKEN_BREAK in set(issue_types) and not _NUMBER_RE.search(recovered_markdown):
+        return False
+    non_empty_cells = [
+        cell.strip()
+        for line in recovered_markdown.splitlines()
+        if "|" in line
+        for cell in line.split("|")
+        if cell.strip() and set(cell.strip()) - {":", "-"}
+    ]
+    return len(non_empty_cells) >= 2
+
+
 def _normalize_table_label(label: str) -> str:
     match = _TABLE_LABEL_RE.search(label)
     if match is None:
@@ -1293,6 +1332,11 @@ class OpenAIVisualTableRecoverer:
                 continue
             recovered_markdown = _normalize_recovered_table_markup(recovery.markdown)
             if not recovered_markdown:
+                continue
+            if not _recovered_table_passes_sanity(
+                recovered_markdown=recovered_markdown,
+                issue_types=task.issue_types,
+            ):
                 continue
             transformed = replace_table_block(
                 updated,

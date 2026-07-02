@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import re
 from typing import TypedDict
@@ -56,6 +56,29 @@ class RepairPlanStep:
     strategy: str
     route_name: str
     targets: tuple[RepairTarget, ...]
+    priority: int = 50
+    expected_gain: float = 0.0
+    estimated_cost: float = 0.0
+    risk_level: str = "low"
+    max_attempts: int = 1
+    verification_rule: str = "score_delta_non_negative"
+    skip_reason: str | None = None
+
+
+@dataclass(slots=True)
+class RepairOutcome:
+    action_name: str
+    issue_type: str | None
+    route_name: str | None
+    verification_rule: str
+    before_score: float
+    before_metrics: dict[str, float]
+    after_score: float | None = None
+    after_metrics: dict[str, float] | None = None
+    score_delta: float | None = None
+    changed_metrics: dict[str, float] = field(default_factory=dict)
+    verification_passed: bool | None = None
+    failure_reason: str | None = None
 
 
 class WorkflowState(TypedDict, total=False):
@@ -67,6 +90,9 @@ class WorkflowState(TypedDict, total=False):
     iteration_count: int
     repair_targets: list[RepairTarget]
     repair_plan: list[RepairPlanStep]
+    repair_plan_history: list[dict[str, object]]
+    repair_outcomes: list[RepairOutcome]
+    diagnosed_issues_history: list[dict[str, object]]
     failed_visual_task_keys: list[str]
     result: WorkflowResult
 
@@ -280,6 +306,9 @@ class WorkflowRunner:
             "repairs": [],
             "accuracy_snapshots": [],
             "iteration_count": 0,
+            "repair_plan_history": [],
+            "repair_outcomes": [],
+            "diagnosed_issues_history": [],
             "failed_visual_task_keys": [],
         }
 
@@ -299,7 +328,15 @@ class WorkflowRunner:
                 repair_actions=[],
             )
         )
-        return {"metrics": metrics, "accuracy_snapshots": snapshots}
+        repair_outcomes = self._verify_repair_outcomes(
+            outcomes=list(state.get("repair_outcomes") or []),
+            metrics=metrics,
+        )
+        return {
+            "metrics": metrics,
+            "accuracy_snapshots": snapshots,
+            "repair_outcomes": repair_outcomes,
+        }
 
     def _route_after_evaluation(self, state: WorkflowState) -> str:
         metrics = state.get("metrics")
@@ -318,7 +355,14 @@ class WorkflowRunner:
             self._materialize_candidate_content(candidate),
             metrics,
         )
-        return {"repair_targets": targets}
+        history = list(state.get("diagnosed_issues_history") or [])
+        history.append(
+            {
+                "iteration": int(state.get("iteration_count", 0)),
+                "issues": [self._target_summary(target) for target in targets],
+            }
+        )
+        return {"repair_targets": targets, "diagnosed_issues_history": history}
 
     def _route_after_quality_inspection(self, state: WorkflowState) -> str:
         return "route"
@@ -332,9 +376,20 @@ class WorkflowRunner:
             for action in state.get("repairs") or []
             if isinstance(action, RepairAction) and action.route_name
         }
+        skipped_steps: list[RepairPlanStep] = []
         filtered_targets: list[RepairTarget] = []
         for target in repair_targets:
             if self._should_skip_repair_target(target, iteration_count, score_delta, attempted_routes):
+                skipped_steps.append(
+                    self._build_repair_plan_step(
+                        strategy=self._repair_strategy_for_target(target),
+                        route_name=target.route_name,
+                        targets=[target],
+                        iteration_count=iteration_count,
+                        score_delta=score_delta,
+                        skip_reason="route_already_attempted_after_stalled_score",
+                    )
+                )
                 continue
             filtered_targets.append(target)
         grouped_targets: dict[tuple[str, str], list[RepairTarget]] = {}
@@ -349,14 +404,26 @@ class WorkflowRunner:
                 item[1],
             ),
         ):
-            plan.append(
-                RepairPlanStep(
-                    strategy=strategy,
-                    route_name=route_name,
-                    targets=tuple(grouped_targets[(strategy, route_name)]),
-                )
+            step = self._build_repair_plan_step(
+                strategy=strategy,
+                route_name=route_name,
+                targets=grouped_targets[(strategy, route_name)],
+                iteration_count=iteration_count,
+                score_delta=score_delta,
             )
-        return {"repair_plan": plan}
+            if step.skip_reason is None:
+                plan.append(step)
+            else:
+                skipped_steps.append(step)
+        plan_history = list(state.get("repair_plan_history") or [])
+        plan_history.append(
+            {
+                "iteration": iteration_count,
+                "score_delta": score_delta,
+                "steps": [self._plan_step_summary(step) for step in [*plan, *skipped_steps]],
+            }
+        )
+        return {"repair_plan": plan, "repair_plan_history": plan_history}
 
     def _route_after_repair_strategy(self, state: WorkflowState) -> str:
         if not state.get("repair_plan"):
@@ -372,6 +439,7 @@ class WorkflowRunner:
         materialized_candidate = self._materialize_candidate_content(candidate)
         repair_plan = list(state.get("repair_plan") or [])
         current_repairs = list(state.get("repairs") or [])
+        current_outcomes = list(state.get("repair_outcomes") or [])
         failed_visual_task_keys = list(state.get("failed_visual_task_keys") or [])
         repaired_candidate = materialized_candidate
         actions: list[RepairAction] = []
@@ -487,9 +555,15 @@ class WorkflowRunner:
 
         if self._config.langsmith_tracing:
             repaired_candidate = self._externalize_candidate_content(repaired_candidate)
+        pending_outcomes = self._build_pending_repair_outcomes(
+            actions=actions,
+            metrics=metrics,
+            repair_plan=repair_plan,
+        )
         return {
             "candidate": repaired_candidate,
             "repairs": current_repairs + actions,
+            "repair_outcomes": current_outcomes + pending_outcomes,
             "iteration_count": int(state.get("iteration_count", 0)) + 1,
             "repair_targets": [],
             "repair_plan": [],
@@ -619,10 +693,221 @@ class WorkflowRunner:
                     },
                     "failed_visual_task_keys": list(state.get("failed_visual_task_keys") or []),
                 },
+                "diagnosed_issues": list(state.get("diagnosed_issues_history") or []),
+                "repair_plan": list(state.get("repair_plan_history") or []),
+                "repair_outcomes": [
+                    self._repair_outcome_summary(outcome)
+                    for outcome in list(state.get("repair_outcomes") or [])
+                ],
+                "skipped_repairs": self._skipped_repair_summaries(
+                    list(state.get("repair_plan_history") or [])
+                ),
                 "accuracy_snapshots": list(state.get("accuracy_snapshots") or []),
             },
         )
         return {"result": result}
+
+    def _target_summary(self, target: RepairTarget) -> dict[str, object]:
+        return {
+            "target_kind": target.target_kind,
+            "issue_type": target.issue_type,
+            "route_name": target.route_name,
+            "description": target.description,
+            "table_label": target.table_label,
+            "page_number": target.page_number,
+            "source_name": target.source_name,
+            "severity": target.severity,
+            "confidence": target.confidence,
+            "source_excerpt": target.source_excerpt,
+            "candidate_excerpt": target.candidate_excerpt,
+            "bbox": target.bbox,
+            "expected_gain": target.expected_gain,
+            "estimated_cost": target.estimated_cost,
+            "risk_level": target.risk_level,
+            "repairability": target.repairability,
+        }
+
+    def _build_repair_plan_step(
+        self,
+        *,
+        strategy: str,
+        route_name: str,
+        targets: list[RepairTarget],
+        iteration_count: int,
+        score_delta: float | None,
+        skip_reason: str | None = None,
+    ) -> RepairPlanStep:
+        expected_gain = round(
+            sum(
+                target.expected_gain
+                if target.expected_gain > 0
+                else (0.08 if strategy == "visual_table_repair" else 0.03)
+                for target in targets
+            ),
+            4,
+        )
+        estimated_cost = round(
+            sum(
+                target.estimated_cost
+                if target.estimated_cost > 0
+                else (1.0 if strategy == "visual_table_repair" else 0.0)
+                for target in targets
+            ),
+            4,
+        )
+        risk_level = self._plan_risk_level(targets)
+        priority = self._repair_strategy_priority(strategy, iteration_count, score_delta)
+        confidence = max((target.confidence for target in targets), default=0.0)
+        effective_skip_reason = skip_reason
+        if effective_skip_reason is None and estimated_cost > 0 and expected_gain < 0.03:
+            effective_skip_reason = "expected_gain_below_cost_gate"
+        if effective_skip_reason is None and risk_level == "high" and confidence < 0.4:
+            effective_skip_reason = "low_confidence_high_risk_repair"
+        return RepairPlanStep(
+            strategy=strategy,
+            route_name=route_name,
+            targets=tuple(targets),
+            priority=priority,
+            expected_gain=expected_gain,
+            estimated_cost=estimated_cost,
+            risk_level=risk_level,
+            max_attempts=1 if strategy == "heuristic" else self._config.repair_fanout_max_tasks,
+            verification_rule=self._verification_rule_for_strategy(strategy),
+            skip_reason=effective_skip_reason,
+        )
+
+    def _plan_risk_level(self, targets: list[RepairTarget]) -> str:
+        levels = {target.risk_level for target in targets}
+        if "high" in levels:
+            return "high"
+        if "medium" in levels:
+            return "medium"
+        return "low"
+
+    def _verification_rule_for_strategy(self, strategy: str) -> str:
+        if strategy == "visual_table_repair":
+            return "table_preservation_or_score_improves"
+        return "score_delta_non_negative"
+
+    def _plan_step_summary(self, step: RepairPlanStep) -> dict[str, object]:
+        return {
+            "strategy": step.strategy,
+            "route_name": step.route_name,
+            "priority": step.priority,
+            "expected_gain": step.expected_gain,
+            "estimated_cost": step.estimated_cost,
+            "risk_level": step.risk_level,
+            "max_attempts": step.max_attempts,
+            "verification_rule": step.verification_rule,
+            "skip_reason": step.skip_reason,
+            "targets": [self._target_summary(target) for target in step.targets],
+        }
+
+    def _metrics_summary(self, metrics: EvaluationMetrics) -> dict[str, float]:
+        return {
+            "text_coverage": float(metrics.text_coverage),
+            "normalized_similarity": float(metrics.normalized_similarity),
+            "structure_retention": float(metrics.structure_retention),
+            "table_preservation": float(metrics.table_preservation),
+            "empty_block_penalty": float(metrics.empty_block_penalty),
+            "repetition_penalty": float(metrics.repetition_penalty),
+            "total_score": float(metrics.total_score),
+        }
+
+    def _build_pending_repair_outcomes(
+        self,
+        *,
+        actions: list[RepairAction],
+        metrics: EvaluationMetrics,
+        repair_plan: list[RepairPlanStep],
+    ) -> list[RepairOutcome]:
+        if not actions:
+            return []
+        verification_by_route = {
+            step.route_name: step.verification_rule
+            for step in repair_plan
+        }
+        before_metrics = self._metrics_summary(metrics)
+        return [
+            RepairOutcome(
+                action_name=action.action_name,
+                issue_type=action.issue_type,
+                route_name=action.route_name,
+                verification_rule=verification_by_route.get(
+                    action.route_name or "",
+                    "score_delta_non_negative",
+                ),
+                before_score=metrics.total_score,
+                before_metrics=before_metrics,
+            )
+            for action in actions
+        ]
+
+    def _verify_repair_outcomes(
+        self,
+        *,
+        outcomes: list[RepairOutcome],
+        metrics: EvaluationMetrics,
+    ) -> list[RepairOutcome]:
+        after_metrics = self._metrics_summary(metrics)
+        for outcome in outcomes:
+            if outcome.verification_passed is not None:
+                continue
+            outcome.after_score = metrics.total_score
+            outcome.after_metrics = after_metrics
+            outcome.score_delta = round(metrics.total_score - outcome.before_score, 6)
+            outcome.changed_metrics = {
+                key: round(after_metrics[key] - outcome.before_metrics.get(key, 0.0), 6)
+                for key in after_metrics
+            }
+            outcome.verification_passed = self._outcome_passed(outcome)
+            if not outcome.verification_passed:
+                outcome.failure_reason = "repair_did_not_improve_required_metric"
+        return outcomes
+
+    def _outcome_passed(self, outcome: RepairOutcome) -> bool:
+        score_delta = outcome.score_delta if outcome.score_delta is not None else 0.0
+        if outcome.verification_rule == "table_preservation_or_score_improves":
+            table_delta = outcome.changed_metrics.get("table_preservation", 0.0)
+            return table_delta > 0 or score_delta >= 0
+        return score_delta >= 0
+
+    def _repair_outcome_summary(self, outcome: RepairOutcome) -> dict[str, object]:
+        return {
+            "action_name": outcome.action_name,
+            "issue_type": outcome.issue_type,
+            "route_name": outcome.route_name,
+            "verification_rule": outcome.verification_rule,
+            "before_score": outcome.before_score,
+            "after_score": outcome.after_score,
+            "score_delta": outcome.score_delta,
+            "changed_metrics": outcome.changed_metrics,
+            "verification_passed": outcome.verification_passed,
+            "failure_reason": outcome.failure_reason,
+        }
+
+    def _skipped_repair_summaries(
+        self,
+        repair_plan_history: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        skipped: list[dict[str, object]] = []
+        for entry in repair_plan_history:
+            steps = entry.get("steps")
+            if not isinstance(steps, list):
+                continue
+            for step in steps:
+                if not isinstance(step, dict) or not step.get("skip_reason"):
+                    continue
+                skipped.append(
+                    {
+                        "iteration": entry.get("iteration"),
+                        "route_name": step.get("route_name"),
+                        "strategy": step.get("strategy"),
+                        "skip_reason": step.get("skip_reason"),
+                        "targets": step.get("targets"),
+                    }
+                )
+        return skipped
 
     def _run_parsers(self, source: DocumentSource, parser_names: list[str]) -> list[ParseCandidate]:
         candidates: list[ParseCandidate] = []
@@ -661,6 +946,15 @@ class WorkflowRunner:
                     "table_label": target.table_label,
                     "page_number": target.page_number,
                     "source_name": target.source_name,
+                    "severity": target.severity,
+                    "confidence": target.confidence,
+                    "expected_gain": target.expected_gain,
+                    "estimated_cost": target.estimated_cost,
+                    "risk_level": target.risk_level,
+                    "repairability": target.repairability,
+                    "source_excerpt": target.source_excerpt,
+                    "candidate_excerpt": target.candidate_excerpt,
+                    "bbox": target.bbox,
                 }
             )
         return {
@@ -680,6 +974,19 @@ class WorkflowRunner:
                 "total_score": metrics.total_score,
                 "table_issues": list(metrics.table_issues),
                 "notes": list(metrics.notes),
+                "issues": [
+                    {
+                        "issue_type": issue.issue_type,
+                        "metric_name": issue.metric_name,
+                        "severity": issue.severity,
+                        "confidence": issue.confidence,
+                        "description": issue.description,
+                        "page_number": issue.page_number,
+                        "table_label": issue.table_label,
+                        "repairability": issue.repairability,
+                    }
+                    for issue in metrics.issues
+                ],
             },
             "repair_targets": normalized_targets,
             "repair_actions": [

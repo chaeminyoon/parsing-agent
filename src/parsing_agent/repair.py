@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from parsing_agent.interfaces import CandidateRepairer
-from parsing_agent.models import DocumentSource, EvaluationMetrics, ParseCandidate, RepairAction
+from parsing_agent.models import DocumentSource, EvaluationIssue, EvaluationMetrics, ParseCandidate, RepairAction
 from parsing_agent.visual_repair import (
     VisualRepairTask,
     _normalize_recovered_table_markup,
@@ -33,6 +33,7 @@ _LIST_RE = re.compile(r"^([-*+]|\d+\.)\s+")
 _IMAGE_RE = re.compile(r"!\[[^\]]*\]\((?:<[^>]+>|[^)]+)\)")
 _HEADING_RE = re.compile(r"^\s*#+\s*(.+?)\s*$")
 _KEY_VALUE_RE = re.compile(r"^\s*(?P<label>[^:：|]{1,80}?)(?:[:：]|\s{2,})(?P<value>.+?)\s*$")
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +54,15 @@ class RepairTarget:
     table_label: str | None = None
     page_number: int | None = None
     source_name: str | None = None
+    severity: str = "medium"
+    confidence: float = 0.5
+    source_excerpt: str | None = None
+    candidate_excerpt: str | None = None
+    bbox: list[float] | None = None
+    expected_gain: float = 0.0
+    estimated_cost: float = 0.0
+    risk_level: str = "low"
+    repairability: str | None = None
 
 
 def _join_lines(lines: list[str], original_text: str) -> str:
@@ -123,6 +133,14 @@ def _missing_structured_source_lines(source: DocumentSource, text: str) -> list[
     return missing
 
 
+def _missing_table_caption_lines(source: DocumentSource, text: str) -> list[tuple[str, str | None, str | None]]:
+    return [
+        item
+        for item in _missing_structured_source_lines(source, text)
+        if _TABLE_CAPTION_RE.match(item[0].strip())
+    ]
+
+
 def _recover_missing_structured_source_lines(source: DocumentSource, text: str) -> str:
     lines = text.splitlines()
     candidate_indexes = _find_present_candidate_line_indexes(lines)
@@ -145,6 +163,65 @@ def _recover_missing_structured_source_lines(source: DocumentSource, text: str) 
         candidate_indexes = _find_present_candidate_line_indexes(result)
         inserted.add(normalized_missing)
     return _join_lines(result, text)
+
+
+def _recover_missing_table_caption_lines(source: DocumentSource, text: str) -> str:
+    lines = text.splitlines()
+    candidate_indexes = _find_present_candidate_line_indexes(lines)
+    missing_lines = _missing_table_caption_lines(source, text)
+    if not missing_lines:
+        return text
+    result = list(lines)
+    inserted: set[str] = set()
+    for missing_line, previous_anchor, next_anchor in missing_lines:
+        normalized_missing = _normalize_compare_line(missing_line)
+        if normalized_missing in inserted or normalized_missing in candidate_indexes:
+            continue
+        if next_anchor is not None and next_anchor in candidate_indexes:
+            insert_at = candidate_indexes[next_anchor]
+        elif previous_anchor is not None and previous_anchor in candidate_indexes:
+            insert_at = candidate_indexes[previous_anchor] + 1
+        else:
+            continue
+        result.insert(insert_at, missing_line)
+        candidate_indexes = _find_present_candidate_line_indexes(result)
+        inserted.add(normalized_missing)
+    return _join_lines(result, text)
+
+
+def _looks_like_recovered_table(markup: str) -> bool:
+    stripped = markup.strip()
+    if not stripped:
+        return False
+    if "<table" in stripped.lower() and "</table>" in stripped.lower():
+        return True
+    table_rows = [
+        line
+        for line in stripped.splitlines()
+        if line.strip().startswith("|") and line.strip().endswith("|")
+    ]
+    if len(table_rows) < 2:
+        return False
+    return any(set(cell.strip()) <= {":", "-"} and cell.strip() for cell in table_rows[1].split("|") if cell.strip())
+
+
+def _recovered_table_passes_sanity(
+    *,
+    recovered_markdown: str,
+    issue_types: tuple[str, ...] | list[str],
+) -> bool:
+    if not _looks_like_recovered_table(recovered_markdown):
+        return False
+    if "numeric_token_break" in set(issue_types) and not _NUMBER_RE.search(recovered_markdown):
+        return False
+    non_empty_cells = [
+        cell.strip()
+        for line in recovered_markdown.splitlines()
+        if "|" in line
+        for cell in line.split("|")
+        if cell.strip() and set(cell.strip()) - {":", "-"}
+    ]
+    return len(non_empty_cells) >= 2
 
 
 def _collapse_blank_lines(text: str) -> str:
@@ -617,6 +694,14 @@ def _classify_repair_directives(
             "Remove markdown image links that add rendering noise or leak into parsed cells.",
             _strip_markdown_images,
         )
+    if _missing_table_caption_lines(source, content):
+        add_directive(
+            "missing_table_caption",
+            "recover_missing_table_captions",
+            "recover_missing_table_caption_lines",
+            "Recover missing source table or figure captions before table-specific repair runs.",
+            lambda current: _recover_missing_table_caption_lines(source, current),
+        )
     if metrics.text_coverage < 0.72 and _missing_structured_source_lines(source, content):
         add_directive(
             "text_coverage_missing_lines",
@@ -709,6 +794,130 @@ def _repair_target_kind(issue_type: str) -> str:
     return "document"
 
 
+def _metric_issue_by_type(metrics: EvaluationMetrics) -> dict[str, EvaluationIssue]:
+    by_type: dict[str, EvaluationIssue] = {}
+    for issue in metrics.issues:
+        by_type.setdefault(issue.issue_type, issue)
+    return by_type
+
+
+def _target_severity(issue: EvaluationIssue | None, default: str = "medium") -> str:
+    if issue is None:
+        return default
+    return issue.severity
+
+
+def _target_confidence(issue: EvaluationIssue | None, default: float = 0.55) -> float:
+    if issue is None:
+        return default
+    return max(0.0, min(1.0, issue.confidence))
+
+
+def _target_expected_gain(
+    *,
+    issue: EvaluationIssue | None,
+    route_name: str,
+    metrics: EvaluationMetrics,
+) -> float:
+    if issue is not None:
+        metric_scores = {
+            "text_coverage": metrics.text_coverage,
+            "normalized_similarity": metrics.normalized_similarity,
+            "structure_retention": metrics.structure_retention,
+            "table_preservation": metrics.table_preservation,
+            "empty_block_penalty": 1.0 - metrics.empty_block_penalty,
+            "repetition_penalty": 1.0 - metrics.repetition_penalty,
+        }
+        metric_score = metric_scores.get(issue.metric_name)
+        if metric_score is not None:
+            return round(max(0.0, min(0.35, (1.0 - metric_score) * issue.confidence)), 4)
+    if route_name == "recover_tables_from_pdf_image":
+        return round(max(0.05, min(0.25, (1.0 - metrics.table_preservation) * 0.6)), 4)
+    return 0.05
+
+
+def _target_cost_and_risk(route_name: str, issue: EvaluationIssue | None) -> tuple[float, str]:
+    if route_name == "recover_tables_from_pdf_image":
+        confidence = 0.5 if issue is None else issue.confidence
+        risk = "medium" if confidence >= 0.6 else "high"
+        return 1.0, risk
+    return 0.0, "low"
+
+
+def _repairability_for_route(route_name: str, issue: EvaluationIssue | None = None) -> str:
+    if issue is not None and issue.repairability:
+        return issue.repairability
+    if route_name == "recover_tables_from_pdf_image":
+        return "visual"
+    return "heuristic"
+
+
+def _target_from_directive(
+    *,
+    directive: RepairDirective,
+    issue: EvaluationIssue | None,
+    metrics: EvaluationMetrics,
+) -> RepairTarget:
+    estimated_cost, risk_level = _target_cost_and_risk(directive.route_name, issue)
+    return RepairTarget(
+        target_kind=_repair_target_kind(directive.issue_type),
+        issue_type=directive.issue_type,
+        route_name=directive.route_name,
+        description=directive.description,
+        source_name="heuristic_directive",
+        severity=_target_severity(issue),
+        confidence=_target_confidence(issue),
+        source_excerpt=None if issue is None else issue.source_excerpt,
+        candidate_excerpt=None if issue is None else issue.candidate_excerpt,
+        bbox=None if issue is None else issue.bbox,
+        expected_gain=_target_expected_gain(
+            issue=issue,
+            route_name=directive.route_name,
+            metrics=metrics,
+        ),
+        estimated_cost=estimated_cost,
+        risk_level=risk_level,
+        repairability=_repairability_for_route(directive.route_name, issue),
+    )
+
+
+def _target_from_table_finding(
+    *,
+    issue_type: str,
+    route_name: str,
+    description: str,
+    source_name: str,
+    metrics: EvaluationMetrics,
+    issue: EvaluationIssue | None = None,
+    table_label: str | None = None,
+    page_number: int | None = None,
+    bbox: list[float] | None = None,
+) -> RepairTarget:
+    estimated_cost, risk_level = _target_cost_and_risk(route_name, issue)
+    return RepairTarget(
+        target_kind="table",
+        issue_type=issue_type,
+        route_name=route_name,
+        description=description,
+        table_label=table_label if table_label is not None else (None if issue is None else issue.table_label),
+        page_number=page_number if page_number is not None else (None if issue is None else issue.page_number),
+        source_name=source_name,
+        severity=_target_severity(issue),
+        confidence=_target_confidence(issue, default=0.65),
+        source_excerpt=None if issue is None else issue.source_excerpt,
+        candidate_excerpt=None if issue is None else issue.candidate_excerpt,
+        bbox=bbox if bbox is not None else (None if issue is None else issue.bbox),
+        expected_gain=_target_expected_gain(
+            issue=issue,
+            route_name=route_name,
+            metrics=metrics,
+        ),
+        estimated_cost=estimated_cost,
+        risk_level=risk_level,
+        repairability=_repairability_for_route(route_name, issue),
+    )
+
+
 def identify_repair_targets(
     source: DocumentSource,
     candidate: ParseCandidate,
@@ -720,13 +929,12 @@ def identify_repair_targets(
     잡힌 표 이슈는 항상 visual repair target으로 변환된다. route 노드는
     이 목록을 보고 heuristic 수리와 이미지 기반 수리를 나눈다.
     """
+    issues_by_type = _metric_issue_by_type(metrics)
     targets = [
-        RepairTarget(
-            target_kind=_repair_target_kind(directive.issue_type),
-            issue_type=directive.issue_type,
-            route_name=directive.route_name,
-            description=directive.description,
-            source_name="heuristic_directive",
+        _target_from_directive(
+            directive=directive,
+            issue=issues_by_type.get(directive.issue_type),
+            metrics=metrics,
         )
         for directive in _classify_repair_directives(source, candidate, metrics)
     ]
@@ -734,14 +942,15 @@ def identify_repair_targets(
     for finding in _structured_table_findings(metrics):
         issue_type = str(finding["issue_type"])
         targets.append(
-            RepairTarget(
-                target_kind="table",
+            _target_from_table_finding(
                 issue_type=issue_type,
                 route_name="recover_tables_from_pdf_image",
                 description=f"Recover broken table regions affected by {issue_type}.",
                 table_label=finding.get("table_label"),
                 page_number=finding.get("page_number"),
                 source_name="judge_table_finding",
+                metrics=metrics,
+                issue=issues_by_type.get(issue_type),
             )
         )
         covered_table_issue_types.add(issue_type)
@@ -770,15 +979,18 @@ def identify_repair_targets(
             if region_key in seen_regions or (table_label is None and page_number is None):
                 continue
             seen_regions.add(region_key)
+            bbox = region.get("bbox")
             targets.append(
-                RepairTarget(
-                    target_kind="table",
+                _target_from_table_finding(
                     issue_type=primary_issue_type,
                     route_name="recover_tables_from_pdf_image",
                     description=f"Recover broken table regions affected by {primary_issue_type}.",
                     table_label=table_label,
                     page_number=page_number,
                     source_name="parser_table_region",
+                    metrics=metrics,
+                    issue=issues_by_type.get(primary_issue_type),
+                    bbox=bbox if isinstance(bbox, list) else None,
                 )
             )
             covered_table_issue_types.add(primary_issue_type)
@@ -786,12 +998,13 @@ def identify_repair_targets(
         if issue_type in covered_table_issue_types:
             continue
         targets.append(
-            RepairTarget(
-                target_kind="table",
+            _target_from_table_finding(
                 issue_type=issue_type,
                 route_name="recover_tables_from_pdf_image",
                 description=f"Recover broken table regions affected by {issue_type}.",
                 source_name="metrics_table_issue",
+                metrics=metrics,
+                issue=issues_by_type.get(issue_type),
             )
         )
     return targets
@@ -914,6 +1127,11 @@ class HeuristicRepairer(CandidateRepairer):
             return None
         recovered_markdown = _normalize_recovered_table_markup(recovery.markdown)
         if not recovered_markdown:
+            return None
+        if not _recovered_table_passes_sanity(
+            recovered_markdown=recovered_markdown,
+            issue_types=task.issue_types,
+        ):
             return None
         transformed = replace_table_block(
             candidate.content,
