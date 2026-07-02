@@ -67,12 +67,103 @@ class WorkflowState(TypedDict, total=False):
     iteration_count: int
     repair_targets: list[RepairTarget]
     repair_plan: list[RepairPlanStep]
+    failed_visual_task_keys: list[str]
     result: WorkflowResult
 
 
 _SUPPORT_PAGE_MARKER_RE = re.compile(r"^<!-- page (\d+) -->$")
 _TABLE_REFERENCE_LINE_RE = re.compile(r"^\[Table reference:.*\]$")
 _IMAGE_OMITTED_LINE_RE = re.compile(r"^\[Image block omitted:.*\]$")
+
+
+def _summarize_ocr_metadata(metadata: dict[str, object] | None) -> dict[str, object]:
+    if not metadata:
+        return {}
+    allowed_keys = {
+        "enabled",
+        "applied",
+        "provider",
+        "reason",
+        "elapsed_ms",
+        "input_text_characters",
+        "output_text_characters",
+        "page_count",
+        "ocr_page_count",
+        "ocr_block_count",
+        "ocr_table_block_count",
+        "ocr_mean_confidence",
+    }
+    return {key: value for key, value in metadata.items() if key in allowed_keys}
+
+
+def _summarize_langsmith_payload(payload: dict) -> dict[str, object]:
+    """Replace graph state with a trace-safe operational summary."""
+    fields: dict[str, object] = {}
+    for key, value in payload.items():
+        if isinstance(value, DocumentSource):
+            fields[str(key)] = {
+                "type": "DocumentSource",
+                "filename": value.path.name,
+                "size_bytes": value.size_bytes,
+                "media_type": value.media_type,
+                "page_count": value.page_count,
+                "has_extracted_text": value.extracted_text is not None,
+                "extracted_text_character_count": len(value.extracted_text or ""),
+                "ocr": _summarize_ocr_metadata(value.ocr_metadata),
+            }
+            continue
+        if isinstance(value, ParseCandidate):
+            image_data = value.metadata.get("embedded_image_data_urls")
+            fields[str(key)] = {
+                "type": "ParseCandidate",
+                "parser_name": value.parser_name,
+                "format_name": value.format_name,
+                "content_character_count": len(value.content)
+                or value.metadata.get("content_character_count", 0),
+                "metadata_keys": sorted(str(item) for item in value.metadata)[:30],
+                "embedded_image_count": len(image_data) if isinstance(image_data, dict) else 0,
+            }
+            continue
+        if isinstance(value, EvaluationMetrics):
+            fields[str(key)] = {
+                "type": "EvaluationMetrics",
+                "total_score": value.total_score,
+                "text_coverage": value.text_coverage,
+                "normalized_similarity": value.normalized_similarity,
+                "structure_retention": value.structure_retention,
+                "table_preservation": value.table_preservation,
+                "llm_judge_score": value.llm_judge_score,
+                "table_issue_count": len(value.table_issues),
+            }
+            continue
+        if isinstance(value, WorkflowResult):
+            fields[str(key)] = {
+                "type": "WorkflowResult",
+                "parser_name": value.best_candidate.parser_name,
+                "parsed_text_character_count": len(value.best_candidate.content),
+                "quality_score": value.metrics.total_score,
+                "quality_gate_passed": bool(
+                    value.report.get("quality_gate", {}).get("passed", False)
+                ),
+                "repair_count": len(value.repairs),
+            }
+            continue
+        if isinstance(value, dict):
+            fields[str(key)] = {
+                "type": "mapping",
+                "key_count": len(value),
+                "keys": sorted(str(item) for item in value)[:30],
+            }
+            continue
+        if isinstance(value, (list, tuple, set)):
+            fields[str(key)] = {"type": "collection", "count": len(value)}
+            continue
+        if isinstance(value, str):
+            fields[str(key)] = {"type": "text", "character_count": len(value)}
+            continue
+        fields[str(key)] = {"type": type(value).__name__}
+
+    return {"trace_payload_policy": "summary_only", "fields": fields}
 
 
 class WorkflowRunner:
@@ -102,7 +193,15 @@ class WorkflowRunner:
     ) -> tuple[WorkflowResult, dict[str, Path]]:
         self._source_text_cache.clear()
         self._candidate_content_cache.clear()
-        source = self._externalize_source_text(build_document_source(Path(input_path), run_id=run_id or uuid4().hex))
+        resolved_output_dir = Path(output_dir)
+        source = self._externalize_source_text(
+            build_document_source(
+                Path(input_path),
+                run_id=run_id or uuid4().hex,
+                config=self._config,
+                artifact_dir=resolved_output_dir / "ocr",
+            )
+        )
         trace_metadata = self._langsmith_metadata(source)
         invoke_config = {
             "run_name": "parsing-agent-workflow",
@@ -125,6 +224,7 @@ class WorkflowRunner:
         result.report["monitoring"]["judge_feedback_log_path"] = str(feedback_log_path)
         written_artifacts = write_workflow_artifacts(result, output_dir)
         artifacts = self._finalize_artifacts(written_artifacts, expected_artifacts)
+        artifacts.update({name: Path(path) for name, path in result.source.ocr_artifacts.items()})
         result.artifacts = {name: str(path) for name, path in artifacts.items()}
         return result, artifacts
 
@@ -161,6 +261,7 @@ class WorkflowRunner:
             self._route_after_repair_strategy,
             {
                 "repair": "repair",
+                "finalize": "finalize",
             },
         )
         graph.add_edge("repair", "evaluate")
@@ -168,7 +269,7 @@ class WorkflowRunner:
         return graph.compile()
 
     def _parse_document_node(self, state: WorkflowState) -> WorkflowState:
-        source = state["source"]
+        source = self._materialize_source_text(state["source"])
         base_parser_name = self._base_parser_name_for_source(source)
         parsed_candidates = self._run_parsers(source, [base_parser_name])
         candidate = self._select_base_candidate(source, parsed_candidates)
@@ -179,6 +280,7 @@ class WorkflowRunner:
             "repairs": [],
             "accuracy_snapshots": [],
             "iteration_count": 0,
+            "failed_visual_task_keys": [],
         }
 
     def _evaluate_candidate_node(self, state: WorkflowState) -> WorkflowState:
@@ -223,12 +325,30 @@ class WorkflowRunner:
 
     def _route_repair_strategy_node(self, state: WorkflowState) -> WorkflowState:
         repair_targets = list(state.get("repair_targets") or [])
-        grouped_targets: dict[tuple[str, str], list[RepairTarget]] = {}
+        iteration_count = int(state.get("iteration_count", 0))
+        score_delta = self._latest_snapshot_score_delta(state)
+        attempted_routes = {
+            action.route_name
+            for action in state.get("repairs") or []
+            if isinstance(action, RepairAction) and action.route_name
+        }
+        filtered_targets: list[RepairTarget] = []
         for target in repair_targets:
+            if self._should_skip_repair_target(target, iteration_count, score_delta, attempted_routes):
+                continue
+            filtered_targets.append(target)
+        grouped_targets: dict[tuple[str, str], list[RepairTarget]] = {}
+        for target in filtered_targets:
             strategy = self._repair_strategy_for_target(target)
             grouped_targets.setdefault((strategy, target.route_name), []).append(target)
         plan: list[RepairPlanStep] = []
-        for strategy, route_name in grouped_targets:
+        for strategy, route_name in sorted(
+            grouped_targets,
+            key=lambda item: (
+                self._repair_strategy_priority(item[0], iteration_count, score_delta),
+                item[1],
+            ),
+        ):
             plan.append(
                 RepairPlanStep(
                     strategy=strategy,
@@ -239,6 +359,8 @@ class WorkflowRunner:
         return {"repair_plan": plan}
 
     def _route_after_repair_strategy(self, state: WorkflowState) -> str:
+        if not state.get("repair_plan"):
+            return "finalize"
         return "repair"
 
     def _repair_candidate_node(self, state: WorkflowState) -> WorkflowState:
@@ -250,6 +372,7 @@ class WorkflowRunner:
         materialized_candidate = self._materialize_candidate_content(candidate)
         repair_plan = list(state.get("repair_plan") or [])
         current_repairs = list(state.get("repairs") or [])
+        failed_visual_task_keys = list(state.get("failed_visual_task_keys") or [])
         repaired_candidate = materialized_candidate
         actions: list[RepairAction] = []
         visual_targets: list[RepairTarget] = []
@@ -285,13 +408,43 @@ class WorkflowRunner:
                 self._config.repair_fanout_enabled
                 and self._should_plan_chunk_repairs(metrics)
             ):
-                chunk_tasks = self._repairer.plan_chunk_repairs(
-                    source,
-                    repaired_candidate,
-                    metrics,
-                    self._config.repair_fanout_max_tasks,
-                )
+                try:
+                    chunk_tasks = self._repairer.plan_chunk_repairs(
+                        source,
+                        repaired_candidate,
+                        metrics,
+                        self._config.repair_fanout_max_tasks,
+                        targets=visual_targets,
+                    )
+                except TypeError:
+                    chunk_tasks = self._repairer.plan_chunk_repairs(
+                        source,
+                        repaired_candidate,
+                        metrics,
+                        self._config.repair_fanout_max_tasks,
+                    )
+                chunk_tasks = [
+                    task
+                    for task in chunk_tasks
+                    if self._visual_task_key(
+                        task.table_label,
+                        task.page_number,
+                        task.issue_types,
+                    )
+                    not in failed_visual_task_keys
+                ]
                 if chunk_tasks:
+                    repair_task_results = [
+                        result
+                        for task in chunk_tasks
+                        for result in self._repair_chunk_node(
+                            {
+                                "source": source,
+                                "task": task,
+                                "candidate": repaired_candidate,
+                            }
+                        )["repair_task_results"]
+                    ]
                     merged = self._merge_repair_chunks_node(
                         {
                             "candidate": repaired_candidate,
@@ -307,19 +460,24 @@ class WorkflowRunner:
                                 )
                                 for task in chunk_tasks
                             ],
-                            "repair_task_results": [
-                                result
-                                for task in chunk_tasks
-                                for result in self._repair_chunk_node(
-                                    {
-                                        "source": source,
-                                        "task": task,
-                                        "candidate": repaired_candidate,
-                                    }
-                                )["repair_task_results"]
-                            ],
+                            "repair_task_results": repair_task_results,
                         }
                     )
+                    failed_by_task_id = {
+                        result.task_id
+                        for result in repair_task_results
+                        if result.candidate is None
+                    }
+                    for task in chunk_tasks:
+                        if task.task_id not in failed_by_task_id:
+                            continue
+                        task_key = self._visual_task_key(
+                            task.table_label,
+                            task.page_number,
+                            task.issue_types,
+                        )
+                        if task_key not in failed_visual_task_keys:
+                            failed_visual_task_keys.append(task_key)
                     if merged:
                         repaired_candidate = self._materialize_candidate_content(merged["pending_candidate"])
                         actions.extend(list(merged.get("pending_actions") or []))
@@ -335,6 +493,7 @@ class WorkflowRunner:
             "iteration_count": int(state.get("iteration_count", 0)) + 1,
             "repair_targets": [],
             "repair_plan": [],
+            "failed_visual_task_keys": failed_visual_task_keys,
         }
 
     def _repair_chunk_node(self, state) -> WorkflowState:
@@ -458,6 +617,7 @@ class WorkflowRunner:
                         "count": 0,
                         "paths": [],
                     },
+                    "failed_visual_task_keys": list(state.get("failed_visual_task_keys") or []),
                 },
                 "accuracy_snapshots": list(state.get("accuracy_snapshots") or []),
             },
@@ -498,6 +658,9 @@ class WorkflowRunner:
                     "issue_type": target.issue_type,
                     "route_name": target.route_name,
                     "description": target.description,
+                    "table_label": target.table_label,
+                    "page_number": target.page_number,
+                    "source_name": target.source_name,
                 }
             )
         return {
@@ -587,6 +750,64 @@ class WorkflowRunner:
             return "visual_table_repair"
         return "heuristic"
 
+    def _repair_strategy_priority(
+        self,
+        strategy: str,
+        iteration_count: int,
+        score_delta: float | None,
+    ) -> int:
+        stalled = iteration_count >= 1 and score_delta is not None and score_delta < 0.01
+        if strategy == "visual_table_repair" and stalled:
+            return 0
+        if strategy == "heuristic" and stalled:
+            return 1
+        if strategy == "heuristic":
+            return 0
+        return 1
+
+    def _should_skip_repair_target(
+        self,
+        target: RepairTarget,
+        iteration_count: int,
+        score_delta: float | None,
+        attempted_routes: set[str],
+    ) -> bool:
+        if target.route_name == "recover_tables_from_pdf_image":
+            return False
+        if iteration_count < 1 or score_delta is None or score_delta >= 0.01:
+            return False
+        return target.route_name in attempted_routes
+
+    def _latest_snapshot_score_delta(self, state: WorkflowState) -> float | None:
+        raw_snapshots = state.get("accuracy_snapshots") or []
+        if len(raw_snapshots) < 2:
+            return None
+        totals: list[float] = []
+        for snapshot in raw_snapshots[-2:]:
+            if not isinstance(snapshot, dict):
+                return None
+            metrics = snapshot.get("metrics")
+            if not isinstance(metrics, dict):
+                return None
+            total_score = metrics.get("total_score")
+            if not isinstance(total_score, (int, float)):
+                return None
+            totals.append(float(total_score))
+        if len(totals) != 2:
+            return None
+        return totals[1] - totals[0]
+
+    def _visual_task_key(
+        self,
+        table_label: str,
+        page_number: int,
+        issue_types: tuple[str, ...] | list[str] | None,
+    ) -> str:
+        normalized_issue_types = tuple(sorted(str(issue_type) for issue_type in (issue_types or ())))
+        if normalized_issue_types:
+            return f"{table_label}|{page_number}|{','.join(normalized_issue_types)}"
+        return f"{table_label}|{page_number}|"
+
     def _needs_candidate_repair(self, metrics: EvaluationMetrics, iteration_count: int) -> bool:
         if self._config.max_repair_rounds <= 0 or iteration_count >= self._config.max_repair_rounds:
             return False
@@ -643,14 +864,39 @@ class WorkflowRunner:
             api_key=self._config.langsmith_api_key,
             api_url=self._config.langsmith_endpoint,
             workspace_id=self._config.langsmith_workspace_id,
+            # LangGraph state can contain parsed text and image data URLs. Replace
+            # it with an operational summary before it leaves the process.
+            hide_inputs=(
+                _summarize_langsmith_payload
+                if self._config.langsmith_hide_inputs
+                else False
+            ),
+            hide_outputs=(
+                _summarize_langsmith_payload
+                if self._config.langsmith_hide_outputs
+                else False
+            ),
         )
 
     def _langsmith_metadata(self, source: DocumentSource) -> dict[str, object]:
+        ocr_metadata = source.ocr_metadata or {}
         return {
-            "source_path": str(source.path),
+            "source_filename": source.path.name,
+            "source_size_bytes": source.size_bytes,
+            "source_text_character_count": len(self._source_text_cache.get(source.run_id, "")),
             "media_type": source.media_type,
             "run_id": source.run_id,
             "page_count": source.page_count,
+            "ocr_enabled": self._config.ocr_enabled,
+            "ocr_provider": ocr_metadata.get("provider", self._config.ocr_provider),
+            "ocr_applied": ocr_metadata.get("applied", False),
+            "ocr_elapsed_ms": ocr_metadata.get("elapsed_ms"),
+            "ocr_page_count": ocr_metadata.get("ocr_page_count") or ocr_metadata.get("page_count"),
+            "ocr_block_count": ocr_metadata.get("ocr_block_count"),
+            "ocr_table_block_count": ocr_metadata.get("ocr_table_block_count"),
+            "ocr_mean_confidence": ocr_metadata.get("ocr_mean_confidence"),
+            "ocr_output_text_characters": ocr_metadata.get("output_text_characters"),
+            "trace_payload_policy": "summary_only",
             "parser_names": list(self._config.parser_names),
             "triage_enabled": self._config.triage_enabled,
             "triage_sample_pages": self._config.triage_sample_pages,

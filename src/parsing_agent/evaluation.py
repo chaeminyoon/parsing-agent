@@ -24,7 +24,7 @@ _PDF_SECTION_CUE_RE = re.compile(
 )
 _PDF_SUBSECTION_CUE_RE = re.compile(r"(?<!\w)([\uAC00-\uD558])\.\s*")
 _PDF_TABLE_LABEL_RE = re.compile(
-    r"\uD45C\s*(?:<\s*)?(\d+(?:\.\d+)*(?:-\d+)?)(?:\s*>)?",
+    r"(?:\uD45C|表)\s*(?:<\s*)?(\d+(?:\.\d+)*(?:-\d+)?)(?:\s*>)?",
     re.IGNORECASE,
 )
 TABLE_ISSUE_MISSING_HEADER = "missing_header"
@@ -330,6 +330,12 @@ def classify_table_issues(source: DocumentSource, candidate: ParseCandidate, jud
         detected.append(issue_type)
 
     if judge_result is not None:
+        for finding in judge_result.table_findings:
+            issue_type = finding.get("issue_type")
+            if isinstance(issue_type, str) and issue_type in TABLE_ISSUE_TAXONOMY:
+                if issue_type == TABLE_ISSUE_TEXT_DUPLICATION and not _has_repeated_table_block(candidate.content):
+                    continue
+                add(issue_type)
         for issue in judge_result.issues:
             for issue_type in extract_table_issue_types(issue):
                 if issue_type == TABLE_ISSUE_TEXT_DUPLICATION and not _has_repeated_table_block(candidate.content):
@@ -346,7 +352,7 @@ def classify_table_issues(source: DocumentSource, candidate: ParseCandidate, jud
 
 def _build_pdf_table_label_pattern(label_id: str) -> re.Pattern[str]:
     return re.compile(
-        rf"\uD45C\s*(?:<\s*)?{re.escape(label_id)}(?:\s*>)?",
+        rf"(?:\uD45C|表)\s*(?:<\s*)?{re.escape(label_id)}(?:\s*>)?",
         re.IGNORECASE,
     )
 
@@ -687,6 +693,31 @@ def _coerce_string_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _coerce_table_findings(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    findings: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        finding: dict[str, Any] = {}
+        issue_type = item.get("issue_type")
+        if issue_type is not None:
+            finding["issue_type"] = str(issue_type)
+        table_label = item.get("table_label")
+        if table_label is not None:
+            finding["table_label"] = str(table_label)
+        page_number = item.get("page_number")
+        if page_number is not None:
+            try:
+                finding["page_number"] = int(page_number)
+            except (TypeError, ValueError):
+                pass
+        if finding:
+            findings.append(finding)
+    return findings
+
+
 def _coerce_judge_score(value: Any) -> float | None:
     if value is None:
         return None
@@ -709,6 +740,11 @@ def _coerce_judge_result(raw_result: Any) -> JudgeResult:
         editorial_readiness=_coerce_judge_score(getattr(raw_result, "editorial_readiness", None)),
         notes=_coerce_string_list(getattr(raw_result, "notes", [])),
         issues=_coerce_string_list(getattr(raw_result, "issues", [])),
+        table_findings=_coerce_table_findings(
+            getattr(raw_result, "table_findings", None)
+            if getattr(raw_result, "table_findings", None) is not None
+            else metadata.get("table_findings")
+        ),
         metadata=dict(metadata),
     )
 

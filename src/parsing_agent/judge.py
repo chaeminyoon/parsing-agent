@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from typing import Any
 from urllib import request
 
@@ -23,12 +24,23 @@ Return strict JSON with this schema:
   "hallucination_risk": number between 0 and 1,
   "editorial_readiness": number between 0 and 1,
   "notes": ["short note", "..."],
-  "issues": ["specific issue", "..."]
+  "issues": ["specific issue", "..."],
+  "table_findings": [
+    {
+      "issue_type": "missing_header | split_multipage_table | merged_cell_loss | numeric_token_break | table_text_duplication",
+      "table_label": "표 4.2-2",
+      "page_number": 12
+    }
+  ]
 }
 `hallucination_risk` is penalty-compatible: 0 means low risk, 1 means high risk.
 `issues` may be omitted or an empty list.
+`table_findings` may be omitted or an empty list.
 `overall_score` should reflect content fidelity, structural preservation, formatting usefulness, and penalize hallucination risk.
+If the document contains table cues or table structure damage, you must use `table_findings` instead of leaving all table problems in free-form `issues`.
+Use `page_number` as the grounded PDF page number you actually inspected, not a printed page label from the document body.
 Do not include any prose outside the JSON object."""
+_TABLE_LABEL_RE = re.compile(r"(?:table|\uD45C)\s*(?:<\s*)?(\d+(?:\.\d+)*(?:-\d+)?)", re.IGNORECASE)
 def _extract_message_content(response_payload: dict[str, Any]) -> str:
     choices = response_payload.get("choices") or []
     if not choices:
@@ -130,8 +142,94 @@ def _coerce_string_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _coerce_table_findings(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    findings: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        finding: dict[str, Any] = {}
+        issue_type = item.get("issue_type")
+        if issue_type is not None:
+            finding["issue_type"] = str(issue_type)
+        table_label = item.get("table_label")
+        if table_label is not None:
+            finding["table_label"] = str(table_label)
+        page_number = item.get("page_number")
+        if page_number is not None:
+            try:
+                finding["page_number"] = int(page_number)
+            except (TypeError, ValueError):
+                pass
+        if finding:
+            findings.append(finding)
+    return findings
+
+
 def _is_pdf_source(source: DocumentSource) -> bool:
     return source.media_type == "application/pdf" or source.path.suffix.lower() == ".pdf"
+
+
+def _extract_table_labels(text: str, limit: int = 5) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for match in _TABLE_LABEL_RE.finditer(text):
+        label = f"표 {match.group(1)}"
+        if label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+def _has_table_cues(text: str) -> bool:
+    if _TABLE_LABEL_RE.search(text):
+        return True
+    stripped = text.strip()
+    if "<table" in stripped.lower():
+        return True
+    markdown_table_lines = 0
+    for line in text.splitlines():
+        raw = line.strip()
+        if raw.count("|") >= 2 and (raw.startswith("|") or raw.endswith("|")):
+            markdown_table_lines += 1
+            if markdown_table_lines >= 2:
+                return True
+    return False
+
+
+def _build_table_review_guidance(
+    source: DocumentSource,
+    source_text: str,
+    candidate_text: str,
+    metrics: EvaluationMetrics,
+) -> str:
+    source_labels = _extract_table_labels(source_text)
+    candidate_labels = _extract_table_labels(candidate_text)
+    table_cues_present = (
+        _has_table_cues(source_text)
+        or _has_table_cues(candidate_text)
+        or metrics.table_preservation < 0.85
+    )
+    if not table_cues_present:
+        return ""
+    guidance_lines = [
+        "If the document contains table cues, inspect table fidelity explicitly.",
+        "Do not leave table_findings empty when you can identify a broken, partial, duplicated, or structurally damaged table.",
+        "Each table_findings entry should use one taxonomy issue_type and include table_label when visible.",
+    ]
+    if source.page_count is not None:
+        guidance_lines.append(
+            f"Use grounded PDF page numbers only. Valid page_number range is 1..{source.page_count}."
+        )
+    if source_labels:
+        guidance_lines.append(f"Source table cues: {', '.join(source_labels)}")
+    if candidate_labels:
+        guidance_lines.append(f"Candidate table cues: {', '.join(candidate_labels)}")
+    return "\n".join(guidance_lines)
 
 
 def _render_pdf_page_data_urls(source: DocumentSource, max_pages: int) -> list[tuple[int, str]]:
@@ -161,6 +259,11 @@ class OpenAICompatibleJudge(CandidateJudge):
         enable_multimodal_grounding: bool = True,
         grounding_max_pages: int = 2,
         prompt_hints: list[str] | None = None,
+        system_prompt: str | None = None,
+        max_source_characters: int = 12_000,
+        max_candidate_characters: int = 12_000,
+        evidence_segments: int = 4,
+        table_evidence_limit: int = 3,
     ) -> None:
         self._model = model
         self._api_key = api_key
@@ -169,6 +272,11 @@ class OpenAICompatibleJudge(CandidateJudge):
         self._enable_multimodal_grounding = enable_multimodal_grounding
         self._grounding_max_pages = grounding_max_pages
         self._prompt_hints = list(prompt_hints or [])
+        self._system_prompt = system_prompt or _SYSTEM_PROMPT
+        self._max_source_characters = max_source_characters
+        self._max_candidate_characters = max_candidate_characters
+        self._evidence_segments = max(2, evidence_segments)
+        self._table_evidence_limit = max(0, table_evidence_limit)
 
     def judge(
         self,
@@ -177,7 +285,20 @@ class OpenAICompatibleJudge(CandidateJudge):
         metrics: EvaluationMetrics,
     ) -> JudgeResult:
         source_text = load_document_source_text(source)
-        prompt = self._build_prompt(source_text, candidate.content, metrics)
+        evidence = _build_judge_evidence(
+            source_text=source_text,
+            candidate_text=candidate.content,
+            max_source_characters=self._max_source_characters,
+            max_candidate_characters=self._max_candidate_characters,
+            segment_count=self._evidence_segments,
+            table_evidence_limit=self._table_evidence_limit,
+        )
+        prompt = self._build_prompt(
+            source,
+            evidence["source_text"],
+            evidence["candidate_text"],
+            metrics,
+        )
         grounding_pages = _render_pdf_page_data_urls(source, self._grounding_max_pages) if self._enable_multimodal_grounding else []
         if grounding_pages:
             response_payload = _post_response(
@@ -188,7 +309,7 @@ class OpenAICompatibleJudge(CandidateJudge):
                     "input": [
                         {
                             "role": "system",
-                            "content": [{"type": "input_text", "text": _SYSTEM_PROMPT}],
+                            "content": [{"type": "input_text", "text": self._system_prompt}],
                         },
                         {
                             "role": "user",
@@ -212,7 +333,7 @@ class OpenAICompatibleJudge(CandidateJudge):
                     "temperature": 0,
                     "response_format": {"type": "json_object"},
                     "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "system", "content": self._system_prompt},
                         {"role": "user", "content": prompt},
                     ],
                 },
@@ -231,15 +352,18 @@ class OpenAICompatibleJudge(CandidateJudge):
             editorial_readiness=_coerce_optional_score(verdict, "editorial_readiness"),
             notes=_coerce_string_list(verdict.get("notes")),
             issues=_coerce_string_list(verdict.get("issues")),
+            table_findings=_coerce_table_findings(verdict.get("table_findings")),
             metadata={
                 "transport": "responses" if grounding_pages else "chat_completions",
                 "grounding_enabled": bool(grounding_pages),
                 "grounding_pages": [page_number for page_number, _ in grounding_pages],
+                "evidence": evidence["metadata"],
             },
         )
 
     def _build_prompt(
         self,
+        source: DocumentSource,
         source_text: str,
         candidate_text: str,
         metrics: EvaluationMetrics,
@@ -248,6 +372,9 @@ class OpenAICompatibleJudge(CandidateJudge):
         if self._prompt_hints:
             tuning_text = "\n".join(f"- {hint}" for hint in self._prompt_hints)
             tuning_text = f"\n\nExtra review instructions from prior failures:\n{tuning_text}"
+        table_guidance = _build_table_review_guidance(source, source_text, candidate_text, metrics)
+        if table_guidance:
+            table_guidance = f"\n\nTable review requirements:\n{table_guidance}"
         return (
             "Judge the parser output against the source.\n\n"
             f"Deterministic metrics: coverage={metrics.text_coverage:.3f}, "
@@ -256,9 +383,12 @@ class OpenAICompatibleJudge(CandidateJudge):
             f"table={metrics.table_preservation:.3f}, "
             f"empty_penalty={metrics.empty_block_penalty:.3f}, "
             f"repeat_penalty={metrics.repetition_penalty:.3f}"
-            f"{tuning_text}\n\n"
-            f"Source text:\n{source_text}\n\n"
-            f"Candidate text:\n{candidate_text}"
+            f"{tuning_text}{table_guidance}\n\n"
+            "The source and candidate below are representative evidence, not full documents. "
+            "Use the deterministic metrics for document-wide coverage; use the evidence to verify "
+            "semantic fidelity, structural quality, and the listed table areas.\n\n"
+            f"Source evidence:\n{source_text}\n\n"
+            f"Candidate evidence:\n{candidate_text}"
         )
 
 
@@ -275,4 +405,99 @@ def build_default_judge(config: WorkflowConfig) -> CandidateJudge | None:
         enable_multimodal_grounding=config.judge_multimodal_grounding_enabled,
         grounding_max_pages=config.judge_grounding_max_pages,
         prompt_hints=load_judge_prompt_hints(config),
+        system_prompt=config.judge_system_prompt,
+        max_source_characters=config.judge_max_source_characters,
+        max_candidate_characters=config.judge_max_candidate_characters,
+        evidence_segments=config.judge_evidence_segments,
+        table_evidence_limit=config.judge_table_evidence_limit,
     )
+
+
+def _build_judge_evidence(
+    *,
+    source_text: str,
+    candidate_text: str,
+    max_source_characters: int,
+    max_candidate_characters: int,
+    segment_count: int,
+    table_evidence_limit: int,
+) -> dict[str, object]:
+    labels = _select_table_labels(source_text, candidate_text, table_evidence_limit)
+    source_evidence = _build_evidence_excerpt(
+        source_text,
+        max_characters=max_source_characters,
+        segment_count=segment_count,
+        table_labels=labels,
+    )
+    candidate_evidence = _build_evidence_excerpt(
+        candidate_text,
+        max_characters=max_candidate_characters,
+        segment_count=segment_count,
+        table_labels=labels,
+    )
+    return {
+        "source_text": source_evidence,
+        "candidate_text": candidate_evidence,
+        "metadata": {
+            "mode": "stratified_evidence",
+            "source_full_character_count": len(source_text),
+            "candidate_full_character_count": len(candidate_text),
+            "source_evidence_character_count": len(source_evidence),
+            "candidate_evidence_character_count": len(candidate_evidence),
+            "segment_count": segment_count,
+            "table_labels": labels,
+        },
+    }
+
+
+def _select_table_labels(source_text: str, candidate_text: str, limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+    labels: list[str] = []
+    seen: set[str] = set()
+    for text in (source_text, candidate_text):
+        for match in _TABLE_LABEL_RE.finditer(text):
+            label = match.group(1)
+            if label in seen:
+                continue
+            seen.add(label)
+            labels.append(label)
+    if len(labels) <= limit:
+        return labels
+    indexes = [round(index * (len(labels) - 1) / (limit - 1)) for index in range(limit)] if limit > 1 else [0]
+    return [labels[index] for index in indexes]
+
+
+def _build_evidence_excerpt(
+    text: str,
+    *,
+    max_characters: int,
+    segment_count: int,
+    table_labels: list[str],
+) -> str:
+    if max_characters <= 0 or len(text) <= max_characters:
+        return text
+
+    pieces: list[str] = []
+    table_budget = min(max_characters // 2, len(table_labels) * 1_000)
+    if table_labels and table_budget:
+        per_table_budget = max(300, table_budget // len(table_labels))
+        for label in table_labels:
+            pattern = re.compile(rf"(?:table|\uD45C)\s*(?:<\s*)?{re.escape(label)}", re.IGNORECASE)
+            match = pattern.search(text)
+            if match is None:
+                continue
+            start = max(0, match.start() - per_table_budget // 3)
+            end = min(len(text), start + per_table_budget)
+            pieces.append(f"[Table evidence: {label}]\n{text[start:end]}")
+
+    used = sum(len(piece) for piece in pieces)
+    remaining = max(1_000, max_characters - used)
+    segment_budget = max(300, remaining // segment_count)
+    max_start = max(0, len(text) - segment_budget)
+    for index in range(segment_count):
+        start = round(index * max_start / max(1, segment_count - 1))
+        end = min(len(text), start + segment_budget)
+        pieces.append(f"[Document segment {index + 1}/{segment_count}]\n{text[start:end]}")
+
+    return "\n\n---\n\n".join(pieces)[:max_characters]

@@ -3,15 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import replace
 import re
+from typing import Any
 
 from parsing_agent.interfaces import CandidateRepairer
 from parsing_agent.models import DocumentSource, EvaluationMetrics, ParseCandidate, RepairAction
 from parsing_agent.visual_repair import (
     VisualRepairTask,
+    _normalize_recovered_table_markup,
     _page_table_selector_from_label,
     replace_page_table_block,
     replace_table_block,
 )
+
+_PDF_SECTION_RE = re.compile(r"^\s*(?:제\s*\d+\s*장|\d+(?:\.\d+)*\.|[가-힣A-Z]\.)\s+")
+_TABLE_CAPTION_RE = re.compile(r"^\s*(?:표|그림|table|figure)\s*\d", re.IGNORECASE)
+_PAGE_MARKER_RE = re.compile(r"^<!-- page (\d+) -->$")
+_PAGE_FOOTER_RE = re.compile(r"^-?\s*\d+\s*-?$")
+_PAREN_LIST_RE = re.compile(r"^\(\d+\)\s+")
 
 
 def _excerpt(text: str, limit: int = 120) -> str:
@@ -42,6 +50,9 @@ class RepairTarget:
     issue_type: str
     route_name: str
     description: str
+    table_label: str | None = None
+    page_number: int | None = None
+    source_name: str | None = None
 
 
 def _join_lines(lines: list[str], original_text: str) -> str:
@@ -49,6 +60,91 @@ def _join_lines(lines: list[str], original_text: str) -> str:
     if original_text.endswith("\n"):
         normalized += "\n"
     return normalized
+
+
+def _normalize_compare_line(line: str) -> str:
+    return re.sub(r"\s+", " ", line.strip()).lower()
+
+
+def _is_structured_source_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if _HEADING_RE.match(stripped):
+        return True
+    if _LIST_RE.match(stripped):
+        return True
+    if _PDF_SECTION_RE.match(stripped):
+        return True
+    if _TABLE_CAPTION_RE.match(stripped):
+        return True
+    if stripped.endswith(":") and len(stripped) <= 80:
+        return True
+    return False
+
+
+def _find_present_candidate_line_indexes(lines: list[str]) -> dict[str, int]:
+    indexes: dict[str, int] = {}
+    for index, line in enumerate(lines):
+        normalized = _normalize_compare_line(line)
+        if not normalized or normalized in indexes:
+            continue
+        indexes[normalized] = index
+    return indexes
+
+
+def _missing_structured_source_lines(source: DocumentSource, text: str) -> list[tuple[str, str | None, str | None]]:
+    source_text = source.extracted_text or ""
+    if not source_text.strip():
+        return []
+    source_lines = source_text.splitlines()
+    candidate_indexes = _find_present_candidate_line_indexes(text.splitlines())
+    missing: list[tuple[str, str | None, str | None]] = []
+    for index, raw_line in enumerate(source_lines):
+        stripped = raw_line.strip()
+        normalized = _normalize_compare_line(stripped)
+        if not _is_structured_source_line(stripped) or not normalized or normalized in candidate_indexes:
+            continue
+        previous_anchor = None
+        for back_index in range(index - 1, -1, -1):
+            prev_normalized = _normalize_compare_line(source_lines[back_index])
+            if prev_normalized and prev_normalized in candidate_indexes:
+                previous_anchor = prev_normalized
+                break
+        next_anchor = None
+        for forward_index in range(index + 1, len(source_lines)):
+            next_normalized = _normalize_compare_line(source_lines[forward_index])
+            if next_normalized and next_normalized in candidate_indexes:
+                next_anchor = next_normalized
+                break
+        if previous_anchor is None and next_anchor is None:
+            continue
+        missing.append((stripped, previous_anchor, next_anchor))
+    return missing
+
+
+def _recover_missing_structured_source_lines(source: DocumentSource, text: str) -> str:
+    lines = text.splitlines()
+    candidate_indexes = _find_present_candidate_line_indexes(lines)
+    missing_lines = _missing_structured_source_lines(source, text)
+    if not missing_lines:
+        return text
+    result = list(lines)
+    inserted: set[str] = set()
+    for missing_line, previous_anchor, next_anchor in missing_lines:
+        normalized_missing = _normalize_compare_line(missing_line)
+        if normalized_missing in inserted or normalized_missing in candidate_indexes:
+            continue
+        if next_anchor is not None and next_anchor in candidate_indexes:
+            insert_at = candidate_indexes[next_anchor]
+        elif previous_anchor is not None and previous_anchor in candidate_indexes:
+            insert_at = candidate_indexes[previous_anchor] + 1
+        else:
+            continue
+        result.insert(insert_at, missing_line)
+        candidate_indexes = _find_present_candidate_line_indexes(result)
+        inserted.add(normalized_missing)
+    return _join_lines(result, text)
 
 
 def _collapse_blank_lines(text: str) -> str:
@@ -68,6 +164,47 @@ def _collapse_blank_lines(text: str) -> str:
         blank_run += 1
 
     return _join_lines(result, text)
+
+
+def _structured_table_findings(metrics: EvaluationMetrics) -> list[dict[str, Any]]:
+    """judge가 반환한 구조화 표 finding을 inspect용 공통 형태로 정규화한다.
+
+    `issue_type`은 필수로 보고, `table_label`, `page_number`는 있으면 함께
+    보존한다. inspect 단계에서 이 정보가 RepairTarget으로 전달돼야 route와
+    repair가 같은 근거를 공유할 수 있다.
+    """
+    judge_result = metrics.judge_result
+    if judge_result is None:
+        return []
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int | None]] = set()
+    for item in judge_result.table_findings:
+        if not isinstance(item, dict):
+            continue
+        issue_type = item.get("issue_type")
+        if not isinstance(issue_type, str) or not issue_type.strip():
+            continue
+        table_label = item.get("table_label")
+        normalized_label = table_label.strip() if isinstance(table_label, str) and table_label.strip() else None
+        raw_page_number = item.get("page_number")
+        page_number: int | None = None
+        if raw_page_number is not None:
+            try:
+                page_number = int(raw_page_number)
+            except (TypeError, ValueError):
+                page_number = None
+        dedupe_key = (issue_type.strip(), normalized_label or "", page_number)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        findings.append(
+            {
+                "issue_type": issue_type.strip(),
+                "table_label": normalized_label,
+                "page_number": page_number,
+            }
+        )
+    return findings
 
 
 def _contains_markdown_images(text: str) -> bool:
@@ -149,6 +286,14 @@ def _is_structural_line(line: str) -> bool:
         return True
     if _LIST_RE.match(stripped):
         return True
+    if _PAREN_LIST_RE.match(stripped):
+        return True
+    if _PDF_SECTION_RE.match(stripped):
+        return True
+    if _TABLE_CAPTION_RE.match(stripped):
+        return True
+    if _PAGE_MARKER_RE.match(stripped) or _PAGE_FOOTER_RE.match(stripped):
+        return True
     return stripped.count("|") >= 2 and (stripped.startswith("|") or stripped.endswith("|"))
 
 
@@ -161,7 +306,7 @@ def _should_merge_lines(current: str, next_line: str) -> bool:
         return False
     if left.endswith((".", "!", "?", ":", ";")):
         return False
-    if left.endswith("-"):
+    if left.endswith("-") and not _PAGE_FOOTER_RE.match(left.strip()):
         return True
     first_char = right[:1]
     return first_char.islower() or first_char.isdigit() or first_char in {'"', "'", "(", "["}
@@ -337,6 +482,82 @@ def _remove_repeated_boundary_lines(text: str) -> str:
     return normalized
 
 
+def _page_segments(lines: list[str]) -> list[tuple[int, int]]:
+    marker_indexes = [index for index, line in enumerate(lines) if _PAGE_MARKER_RE.match(line.strip())]
+    if not marker_indexes:
+        return []
+    segments: list[tuple[int, int]] = []
+    for index, marker_index in enumerate(marker_indexes):
+        next_marker = marker_indexes[index + 1] if index + 1 < len(marker_indexes) else len(lines)
+        segments.append((marker_index, next_marker))
+    return segments
+
+
+def _repeated_pdf_boundary_lines(text: str) -> set[str]:
+    lines = text.splitlines()
+    repeated: dict[str, int] = {}
+    for start, end in _page_segments(lines):
+        page_lines = lines[start + 1 : end]
+        non_empty = [line.strip() for line in page_lines if line.strip()]
+        if len(non_empty) < 2:
+            continue
+        first_line = non_empty[0]
+        last_line = non_empty[-1]
+        for candidate in (first_line, last_line):
+            if len(candidate) > 40 or _is_structural_line(candidate):
+                continue
+            normalized = _normalize_compare_line(candidate)
+            repeated[normalized] = repeated.get(normalized, 0) + 1
+    return {line for line, count in repeated.items() if count >= 2}
+
+
+def _remove_repeated_pdf_header_footer_lines(text: str) -> str:
+    repeated_lines = _repeated_pdf_boundary_lines(text)
+    if not repeated_lines:
+        return text
+    lines = text.splitlines()
+    result: list[str] = []
+    for start, end in _page_segments(lines):
+        result.append(lines[start])
+        page_lines = lines[start + 1 : end]
+        non_empty_indexes = [index for index, line in enumerate(page_lines) if line.strip()]
+        first_non_empty = non_empty_indexes[0] if non_empty_indexes else None
+        last_non_empty = non_empty_indexes[-1] if non_empty_indexes else None
+        for index, line in enumerate(page_lines):
+            normalized = _normalize_compare_line(line)
+            if normalized in repeated_lines and index in {first_non_empty, last_non_empty}:
+                continue
+            result.append(line)
+    return _join_lines(result, text)
+
+
+def _looks_like_pdf_boundary_heading(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return bool(_PDF_SECTION_RE.match(stripped) or _LIST_RE.match(stripped) or _TABLE_CAPTION_RE.match(stripped))
+
+
+def _restore_pdf_boundaries(text: str) -> str:
+    lines = text.splitlines()
+    if not lines:
+        return text
+    result: list[str] = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if _looks_like_pdf_boundary_heading(stripped):
+            previous = result[-1].strip() if result else ""
+            if previous and not _PAGE_MARKER_RE.match(previous):
+                result.append("")
+        result.append(line)
+        if not _looks_like_pdf_boundary_heading(stripped):
+            continue
+        next_line = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        if next_line and not _looks_like_pdf_boundary_heading(next_line):
+            result.append("")
+    return _collapse_blank_lines(_join_lines(result, text))
+
+
 def _is_pdf_candidate(source: DocumentSource, candidate: ParseCandidate) -> bool:
     source_path = candidate.source_path or source.path
     return source.media_type == "application/pdf" or source_path.suffix.lower() == ".pdf"
@@ -396,6 +617,14 @@ def _classify_repair_directives(
             "Remove markdown image links that add rendering noise or leak into parsed cells.",
             _strip_markdown_images,
         )
+    if metrics.text_coverage < 0.72 and _missing_structured_source_lines(source, content):
+        add_directive(
+            "text_coverage_missing_lines",
+            "recover_missing_source_lines",
+            "recover_missing_structured_source_lines",
+            "Recover short structured source lines that disappeared from the parsed result.",
+            lambda current: _recover_missing_structured_source_lines(source, current),
+        )
     if not defer_table_rewrite and (metrics.table_preservation < 0.75 or _has_table_layout_noise(content)):
         add_directive(
             "table_layout_noise",
@@ -429,6 +658,14 @@ def _classify_repair_directives(
             _collapse_blank_lines,
         )
     if metrics.repetition_penalty > 0:
+        if _is_pdf_candidate(source, candidate) and _repeated_pdf_boundary_lines(content):
+            add_directive(
+                "pdf_header_footer_noise",
+                "deduplicate_pdf_headers",
+                "remove_repeated_pdf_header_footer_lines",
+                "Remove repeated short header and footer lines that recur across PDF pages.",
+                _remove_repeated_pdf_header_footer_lines,
+            )
         add_directive(
             "boundary_repetition_noise",
             "deduplicate_boundaries",
@@ -451,6 +688,16 @@ def _classify_repair_directives(
             "Merge neighboring wrapped lines inside plain-text paragraphs.",
             _merge_wrapped_lines,
         )
+    if _is_pdf_candidate(source, candidate) and metrics.structure_retention < 0.75:
+        restored = _restore_pdf_boundaries(content)
+        if restored != content:
+            add_directive(
+                "pdf_block_boundary_noise",
+                "restore_pdf_boundaries",
+                "restore_pdf_boundaries",
+                "Restore blank-line boundaries around PDF headings, lists, and table captions.",
+                _restore_pdf_boundaries,
+            )
     return directives
 
 
@@ -479,16 +726,72 @@ def identify_repair_targets(
             issue_type=directive.issue_type,
             route_name=directive.route_name,
             description=directive.description,
+            source_name="heuristic_directive",
         )
         for directive in _classify_repair_directives(source, candidate, metrics)
     ]
-    for issue_type in metrics.table_issues:
+    covered_table_issue_types: set[str] = set()
+    for finding in _structured_table_findings(metrics):
+        issue_type = str(finding["issue_type"])
         targets.append(
             RepairTarget(
                 target_kind="table",
                 issue_type=issue_type,
                 route_name="recover_tables_from_pdf_image",
                 description=f"Recover broken table regions affected by {issue_type}.",
+                table_label=finding.get("table_label"),
+                page_number=finding.get("page_number"),
+                source_name="judge_table_finding",
+            )
+        )
+        covered_table_issue_types.add(issue_type)
+    table_regions = candidate.metadata.get("table_regions")
+    if (
+        not covered_table_issue_types
+        and isinstance(table_regions, list)
+        and metrics.table_issues
+    ):
+        primary_issue_type = metrics.table_issues[0]
+        seen_regions: set[tuple[str | None, int | None]] = set()
+        for region in table_regions:
+            if not isinstance(region, dict):
+                continue
+            table_label = region.get("label") or region.get("table_label")
+            if isinstance(table_label, str):
+                table_label = table_label.strip() or None
+            else:
+                table_label = None
+            raw_page_number = region.get("page_number", region.get("page"))
+            try:
+                page_number = int(raw_page_number) if raw_page_number is not None else None
+            except (TypeError, ValueError):
+                page_number = None
+            region_key = (table_label, page_number)
+            if region_key in seen_regions or (table_label is None and page_number is None):
+                continue
+            seen_regions.add(region_key)
+            targets.append(
+                RepairTarget(
+                    target_kind="table",
+                    issue_type=primary_issue_type,
+                    route_name="recover_tables_from_pdf_image",
+                    description=f"Recover broken table regions affected by {primary_issue_type}.",
+                    table_label=table_label,
+                    page_number=page_number,
+                    source_name="parser_table_region",
+                )
+            )
+            covered_table_issue_types.add(primary_issue_type)
+    for issue_type in metrics.table_issues:
+        if issue_type in covered_table_issue_types:
+            continue
+        targets.append(
+            RepairTarget(
+                target_kind="table",
+                issue_type=issue_type,
+                route_name="recover_tables_from_pdf_image",
+                description=f"Recover broken table regions affected by {issue_type}.",
+                source_name="metrics_table_issue",
             )
         )
     return targets
@@ -558,6 +861,7 @@ class HeuristicRepairer(CandidateRepairer):
         candidate: ParseCandidate,
         metrics: EvaluationMetrics,
         max_tasks: int,
+        targets: list[RepairTarget] | None = None,
     ) -> list[VisualRepairTask]:
         """어떤 표 영역을 visual repair 할지 task 목록만 계획한다.
 
@@ -568,13 +872,24 @@ class HeuristicRepairer(CandidateRepairer):
             return []
         if not metrics.table_issues:
             return []
-        return self._visual_table_recoverer.plan_tasks(
-            source,
-            candidate.content,
-            metrics,
-            candidate_metadata=candidate.metadata,
-            max_tasks=max_tasks,
-        )[:max_tasks]
+        try:
+            planned = self._visual_table_recoverer.plan_tasks(
+                source,
+                candidate.content,
+                metrics,
+                candidate_metadata=candidate.metadata,
+                max_tasks=max_tasks,
+                repair_targets=targets,
+            )
+        except TypeError:
+            planned = self._visual_table_recoverer.plan_tasks(
+                source,
+                candidate.content,
+                metrics,
+                candidate_metadata=candidate.metadata,
+                max_tasks=max_tasks,
+            )
+        return planned[:max_tasks]
 
     def apply_chunk_repair(
         self,
@@ -589,13 +904,21 @@ class HeuristicRepairer(CandidateRepairer):
         """
         if self._visual_table_recoverer is None:
             return None
-        recovery = self._visual_table_recoverer.recover_task(source, candidate.content, task)
+        if source.page_count is not None and (task.page_number < 1 or task.page_number > source.page_count):
+            return None
+        try:
+            recovery = self._visual_table_recoverer.recover_task(source, candidate.content, task)
+        except Exception:
+            return None
         if recovery is None or recovery.confidence < 0.45 or not recovery.markdown.strip():
+            return None
+        recovered_markdown = _normalize_recovered_table_markup(recovery.markdown)
+        if not recovered_markdown:
             return None
         transformed = replace_table_block(
             candidate.content,
             task.table_label,
-            recovery.markdown,
+            recovered_markdown,
             candidate_metadata=candidate.metadata,
         )
         page_number = None
@@ -605,7 +928,7 @@ class HeuristicRepairer(CandidateRepairer):
                 transformed = replace_page_table_block(
                     candidate.content,
                     page_number,
-                    recovery.markdown,
+                    recovered_markdown,
                     table_index=table_index,
                 )
         if transformed == candidate.content:
@@ -636,7 +959,7 @@ class HeuristicRepairer(CandidateRepairer):
                 metadata={
                     **candidate.metadata,
                     "repair_chunk_table_label": task.table_label,
-                    "repair_chunk_markdown": recovery.markdown,
+                    "repair_chunk_markdown": recovered_markdown,
                     "repair_chunk_issue_types": list(task.issue_types),
                     "repair_chunk_output_format": task.preferred_output_format,
                 },

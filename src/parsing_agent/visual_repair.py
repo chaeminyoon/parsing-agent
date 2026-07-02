@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import html
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
@@ -28,6 +30,9 @@ _HEADING_RE = re.compile(r"^\s*#+\s+")
 _PAGE_REF_RE = re.compile(r"\bp\.?\s*(\d+)\b", re.IGNORECASE)
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 _PAGE_SCOPED_TABLE_PREFIX = "__page_table__:"
+_HTML_TABLE_RE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_GENERIC_HTML_TAG_RE = re.compile(r"</?(?:[A-Za-z][A-Za-z0-9:-]*)(?:\s+[^<>]*?)?>", re.IGNORECASE)
 _SYSTEM_PROMPT = """You repair broken markdown tables extracted from PDFs.
 Return strict JSON with this schema:
 {
@@ -102,6 +107,67 @@ def extract_issue_page_numbers(issues: Iterable[str]) -> list[int]:
             seen.add(page_number)
             page_numbers.append(page_number)
     return page_numbers
+
+
+def _structured_table_findings(metrics: EvaluationMetrics) -> list[dict[str, Any]]:
+    judge_result = metrics.judge_result
+    if judge_result is None:
+        return []
+    findings: list[dict[str, Any]] = []
+    for item in judge_result.table_findings:
+        if not isinstance(item, dict):
+            continue
+        normalized: dict[str, Any] = {}
+        issue_type = item.get("issue_type")
+        if isinstance(issue_type, str) and issue_type:
+            normalized["issue_type"] = issue_type
+        table_label = item.get("table_label")
+        if isinstance(table_label, str) and table_label.strip():
+            normalized["table_label"] = table_label.strip()
+        page_number = item.get("page_number")
+        if page_number is not None:
+            try:
+                normalized["page_number"] = int(page_number)
+            except (TypeError, ValueError):
+                pass
+        if normalized:
+            findings.append(normalized)
+    return findings
+
+
+def _structured_table_findings_from_targets(repair_targets: Iterable[Any] | None) -> list[dict[str, Any]]:
+    """route/repair가 전달한 structured table target을 visual repair 입력으로 정규화한다."""
+    if repair_targets is None:
+        return []
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int | None]] = set()
+    for item in repair_targets:
+        if getattr(item, "target_kind", None) != "table":
+            continue
+        issue_type = getattr(item, "issue_type", None)
+        if not isinstance(issue_type, str) or not issue_type.strip():
+            continue
+        table_label = getattr(item, "table_label", None)
+        normalized_label = table_label.strip() if isinstance(table_label, str) and table_label.strip() else None
+        raw_page_number = getattr(item, "page_number", None)
+        page_number: int | None = None
+        if raw_page_number is not None:
+            try:
+                page_number = int(raw_page_number)
+            except (TypeError, ValueError):
+                page_number = None
+        dedupe_key = (issue_type.strip(), normalized_label or "", page_number)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        findings.append(
+            {
+                "issue_type": issue_type.strip(),
+                "table_label": normalized_label,
+                "page_number": page_number,
+            }
+        )
+    return findings
 
 
 def _page_scoped_table_label(page_number: int) -> str:
@@ -296,6 +362,41 @@ def _resolve_page_number_from_metadata(table_label: str, candidate_metadata: dic
     return None
 
 
+def _is_valid_page_number(page_number: int | None, source: DocumentSource) -> bool:
+    if not isinstance(page_number, int):
+        return False
+    if page_number < 1:
+        return False
+    if source.page_count is not None and page_number > source.page_count:
+        return False
+    return True
+
+
+def _resolve_structured_finding_page_number(
+    source: DocumentSource,
+    table_label: str | None,
+    page_number: int | None,
+    candidate_metadata: dict[str, Any] | None,
+    find_page_number,
+) -> int | None:
+    """structured finding의 page 후보를 명시적 우선순위 규칙으로 보정한다.
+
+    raw page_number가 유효하면 그대로 사용하고, 없거나 범위를 벗어난 경우에만
+    metadata와 실제 PDF label 검색 결과로 보정한다.
+    """
+    if _is_valid_page_number(page_number, source):
+        return page_number
+    normalized_label = table_label.strip() if isinstance(table_label, str) and table_label.strip() else None
+    if normalized_label:
+        metadata_page = _resolve_page_number_from_metadata(normalized_label, candidate_metadata)
+        if _is_valid_page_number(metadata_page, source):
+            return metadata_page
+        found_page = find_page_number(source.path, normalized_label)
+        if _is_valid_page_number(found_page, source):
+            return found_page
+    return None
+
+
 def _resolve_table_position_from_metadata(
     table_label: str,
     candidate_metadata: dict[str, Any] | None = None,
@@ -471,12 +572,238 @@ def _parse_recovery_payload(response_text: str, table_label: str, page_number: i
     return normalized_payload
 
 
+class _RecoveredHtmlTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[dict[str, Any]]] = []
+        self.current_row: list[dict[str, Any]] | None = None
+        self.current_cell: dict[str, Any] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        attrs_dict = dict(attrs)
+        if tag == "tr":
+            self.current_row = []
+        elif tag in {"td", "th"}:
+            self.current_cell = {
+                "is_header": tag == "th",
+                "rowspan": _safe_span(attrs_dict.get("rowspan")),
+                "colspan": _safe_span(attrs_dict.get("colspan")),
+                "parts": [],
+            }
+        elif tag == "br" and self.current_cell is not None:
+            self.current_cell["parts"].append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"td", "th"} and self.current_cell is not None and self.current_row is not None:
+            self.current_row.append(
+                {
+                    "text": _normalize_recovered_cell_text("".join(self.current_cell["parts"])),
+                    "is_header": self.current_cell["is_header"],
+                    "rowspan": self.current_cell["rowspan"],
+                    "colspan": self.current_cell["colspan"],
+                }
+            )
+            self.current_cell = None
+        elif tag == "tr" and self.current_row is not None:
+            self.rows.append(self.current_row)
+            self.current_row = None
+
+    def handle_data(self, data: str) -> None:
+        if self.current_cell is not None:
+            self.current_cell["parts"].append(data)
+
+
+def _safe_span(value: str | None) -> int:
+    try:
+        return max(int(value or "1"), 1)
+    except ValueError:
+        return 1
+
+
+def _normalize_recovered_cell_text(text: str) -> str:
+    normalized = html.unescape(text).replace("\xa0", " ")
+    normalized = re.sub(r"\s*\n\s*", "<br>", normalized.strip())
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    return normalized.strip()
+
+
+def _pad_rows(rows: list[list[str]], width: int | None = None) -> list[list[str]]:
+    target = width if width is not None else max((len(row) for row in rows), default=0)
+    return [row + [""] * (target - len(row)) for row in rows]
+
+
+def _trim_empty_columns(rows: list[list[str]]) -> list[list[str]]:
+    if not rows:
+        return rows
+    width = len(rows[0])
+    keep_indices = [col for col in range(width) if any(row[col].strip() for row in rows)]
+    if not keep_indices:
+        return rows
+    return [[row[col] for col in keep_indices] for row in rows]
+
+
+def _expand_recovered_html_rows(
+    rows: list[list[dict[str, Any]]],
+    *,
+    trim_empty: bool = True,
+) -> tuple[list[list[str]], int]:
+    expanded: list[list[str]] = []
+    active_rowspans: dict[int, dict[str, Any]] = {}
+    header_rows = 0
+
+    for row in rows:
+        out_row: list[str] = []
+        col = 0
+        row_is_header = bool(row) and all(bool(cell["is_header"]) for cell in row)
+
+        def consume_active() -> None:
+            nonlocal col
+            while col in active_rowspans:
+                span = active_rowspans[col]
+                out_row.append(str(span["text"]))
+                span["remaining"] -= 1
+                if span["remaining"] <= 0:
+                    del active_rowspans[col]
+                col += 1
+
+        if not row_is_header:
+            active_rowspans = {
+                col_idx: span for col_idx, span in active_rowspans.items() if not bool(span.get("from_header"))
+            }
+
+        consume_active()
+        if row_is_header and len(expanded) == header_rows:
+            header_rows += 1
+
+        for cell in row:
+            text = str(cell["text"])
+            colspan = max(int(cell["colspan"]), 1)
+            rowspan = max(int(cell["rowspan"]), 1)
+            for span_idx in range(colspan):
+                out_row.append(text if span_idx == 0 else "")
+                if rowspan > 1:
+                    active_rowspans[col] = {
+                        "remaining": rowspan - 1,
+                        "text": text,
+                        "from_header": row_is_header,
+                    }
+                col += 1
+            consume_active()
+
+        expanded.append(out_row)
+
+    expanded = _pad_rows(expanded)
+    if trim_empty:
+        expanded = _trim_empty_columns(expanded)
+    return expanded, max(header_rows, 1 if expanded else 0)
+
+
+def _fill_header_blanks(header_rows: list[list[str]]) -> list[list[str]]:
+    filled: list[list[str]] = []
+    for row in header_rows:
+        current = ""
+        output_row: list[str] = []
+        for cell in row:
+            value = cell.strip()
+            if value:
+                current = value
+            output_row.append(value or current)
+        filled.append(output_row)
+    return filled
+
+
+def _collapse_header_rows(header_rows: list[list[str]]) -> list[str]:
+    if not header_rows:
+        return []
+    filled_rows = _fill_header_blanks(header_rows)
+    width = len(filled_rows[0])
+    collapsed: list[str] = []
+    for col in range(width):
+        parts: list[str] = []
+        for row in filled_rows:
+            value = row[col].strip()
+            if value and (not parts or parts[-1] != value):
+                parts.append(value)
+        collapsed.append(" / ".join(parts))
+    return collapsed
+
+
+def _escape_markdown_cell(text: str) -> str:
+    return text.replace("|", r"\|").strip()
+
+
+def _html_table_to_markdown(table_html: str) -> str:
+    parser = _RecoveredHtmlTableParser()
+    parser.feed(table_html)
+    source_rows = parser.rows
+    if not source_rows:
+        return ""
+
+    header_source_rows: list[list[dict[str, Any]]] = []
+    body_source_rows: list[list[dict[str, Any]]] = []
+    header_done = False
+    for row in source_rows:
+        row_is_header = bool(row) and all(bool(cell["is_header"]) for cell in row)
+        if not header_done and row_is_header:
+            header_source_rows.append(row)
+            continue
+        header_done = True
+        body_source_rows.append(row)
+
+    if header_source_rows:
+        header_grid, _ = _expand_recovered_html_rows(header_source_rows, trim_empty=False)
+        body_rows, _ = _expand_recovered_html_rows(body_source_rows, trim_empty=False)
+    else:
+        all_rows, header_count = _expand_recovered_html_rows(source_rows)
+        header_count = max(header_count, 1)
+        header_grid = all_rows[:header_count]
+        body_rows = all_rows[header_count:]
+
+    target_width = max(
+        max((len(row) for row in header_grid), default=0),
+        max((len(row) for row in body_rows), default=0),
+    )
+    if target_width:
+        header_grid = _pad_rows(header_grid, target_width)
+        body_rows = _pad_rows(body_rows, target_width)
+
+    combined_rows = _trim_empty_columns(header_grid + body_rows)
+    header_grid = combined_rows[: len(header_grid)]
+    body_rows = combined_rows[len(header_grid) :]
+    header_grid = [[cell.strip() for cell in row] for row in header_grid]
+    body_rows = [[cell.strip() for cell in row] for row in body_rows]
+    header = _collapse_header_rows(header_grid)
+    if not header:
+        return ""
+
+    lines = [
+        "| " + " | ".join(_escape_markdown_cell(cell) for cell in header) + " |",
+        "| " + " | ".join("---" for _ in header) + " |",
+    ]
+    for row in body_rows:
+        if any(cell.strip() for cell in row):
+            lines.append("| " + " | ".join(_escape_markdown_cell(cell) for cell in row) + " |")
+    return "\n".join(lines)
+
+
+def _replace_html_tables_with_markdown(markup: str) -> str:
+    return _HTML_TABLE_RE.sub(lambda match: _html_table_to_markdown(match.group(0)) or match.group(0), markup)
+
+
 def _normalize_recovered_table_markup(markup: str) -> str:
-    normalized = markup.replace("km²", "㎢")
+    normalized = _replace_html_tables_with_markdown(markup)
+    normalized = _MARKDOWN_IMAGE_RE.sub("", normalized)
+    normalized = re.sub(r"<br\s*/?>", " ", normalized, flags=re.IGNORECASE)
+    normalized = _GENERIC_HTML_TAG_RE.sub("", normalized)
+    normalized = normalized.replace("km²", "㎢")
     normalized = re.sub(r"((?:총|기)?매립\s*용량\s*)\(\s*㎡\s*\)", r"\1(㎥)", normalized)
     normalized = re.sub(r"(잔여\s*매립\s*가능량\s*)\(\s*㎡\s*\)", r"\1(㎥)", normalized)
     normalized = re.sub(r"(?<!\d)(\d{1,3}),(\d)(?!\d)", r"\1.\2", normalized)
-    return normalized
+    normalized = re.sub(r"[ \t]+\n", "\n", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
 
 
 def _normalize_table_label(label: str) -> str:
@@ -964,15 +1291,18 @@ class OpenAIVisualTableRecoverer:
                 continue
             if recovery.confidence < self._min_confidence or not recovery.markdown.strip():
                 continue
+            recovered_markdown = _normalize_recovered_table_markup(recovery.markdown)
+            if not recovered_markdown:
+                continue
             transformed = replace_table_block(
                 updated,
                 task.table_label,
-                recovery.markdown,
+                recovered_markdown,
                 candidate_metadata=candidate_metadata,
             )
             if transformed == updated and task.table_label.startswith(_PAGE_SCOPED_TABLE_PREFIX):
                 _page_number, table_index = _page_table_selector_from_label(task.table_label)
-                transformed = replace_page_table_block(updated, task.page_number, recovery.markdown, table_index=table_index)
+                transformed = replace_page_table_block(updated, task.page_number, recovered_markdown, table_index=table_index)
             if transformed == updated:
                 continue
             note_suffix = ""
@@ -1005,6 +1335,7 @@ class OpenAIVisualTableRecoverer:
         metrics: EvaluationMetrics,
         candidate_metadata: dict[str, Any] | None = None,
         max_tasks: int | None = None,
+        repair_targets: Iterable[Any] | None = None,
     ) -> list[VisualRepairTask]:
         if not _is_pdf_source(source) or not metrics.table_issues:
             return []
@@ -1015,7 +1346,66 @@ class OpenAIVisualTableRecoverer:
         )
         issue_types = _task_issue_types(metrics)
         judge_result = metrics.judge_result
+        routed_findings = _structured_table_findings_from_targets(repair_targets)
+        if routed_findings:
+            for index, finding in enumerate(routed_findings[:effective_max_tasks]):
+                table_label = str(finding.get("table_label") or "").strip()
+                resolved_page_number = _resolve_structured_finding_page_number(
+                    source,
+                    table_label,
+                    finding.get("page_number"),
+                    candidate_metadata,
+                    self._find_page_number,
+                )
+                if resolved_page_number is None:
+                    continue
+                task_label = table_label or _page_scoped_table_label(resolved_page_number)
+                tasks.append(
+                    VisualRepairTask(
+                        task_id=f"visual-target-table-{resolved_page_number}-{index}",
+                        table_label=task_label,
+                        page_number=resolved_page_number,
+                        issue_types=issue_types,
+                        preferred_output_format=(
+                            "html"
+                            if _prefers_html_table_output(issue_types, candidate_metadata)
+                            else preferred_output_format
+                        ),
+                    )
+                )
+            if tasks:
+                return tasks
         if judge_result is not None:
+            structured_findings = _structured_table_findings(metrics)
+            if structured_findings:
+                for index, finding in enumerate(structured_findings[:effective_max_tasks]):
+                    table_label = str(finding.get("table_label") or "").strip()
+                    resolved_page_number = _resolve_structured_finding_page_number(
+                        source,
+                        table_label,
+                        finding.get("page_number"),
+                        candidate_metadata,
+                        self._find_page_number,
+                    )
+                    if resolved_page_number is None:
+                        continue
+                    task_label = table_label or _page_scoped_table_label(resolved_page_number)
+                    tasks.append(
+                        VisualRepairTask(
+                            task_id=f"visual-structured-table-{resolved_page_number}-{index}",
+                            table_label=task_label,
+                            page_number=resolved_page_number,
+                            issue_types=issue_types,
+                            preferred_output_format=(
+                                "html"
+                                if _prefers_html_table_output(issue_types, candidate_metadata)
+                                else preferred_output_format
+                            ),
+                        )
+                    )
+                if tasks:
+                    return tasks
+
             explicit_labels = extract_table_labels(judge_result.issues)
             indexed_labels = list(enumerate(explicit_labels))
             indexed_labels.sort(

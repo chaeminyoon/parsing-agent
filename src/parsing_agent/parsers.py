@@ -31,6 +31,11 @@ _TABLE_LABEL_LINE_RE = re.compile(
     r"^\s*(?:table|\uD45C)\s*(?:<\s*)?\d+(?:\.\d+)*(?:-\d+)?(?:\s*>)?",
     re.IGNORECASE,
 )
+_TABLE_LABEL_CAPTURE_RE = re.compile(
+    r"^\s*((?:table|\uD45C)\s*(?:<\s*)?(\d+(?:\.\d+)*(?:-\d+)?)(?:\s*>)?)",
+    re.IGNORECASE,
+)
+_PAGE_MARKER_RE = re.compile(r"^<!-- page (\d+) -->$")
 _TEXT_READ_ENCODINGS = ("utf-8", "utf-8-sig", "cp949", "euc-kr")
 
 
@@ -192,6 +197,239 @@ def _extract_markdown_image_data_urls(markdown_text: str, markdown_path: Path) -
             continue
         embedded_images[cleaned_target] = data_url
     return embedded_images
+
+
+def _split_markdown_table_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    cells = _split_markdown_table_cells(line)
+    if not cells:
+        return False
+    return all(cell and set(cell) <= {":", "-"} for cell in cells)
+
+
+def _is_markdown_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.count("|") >= 2 and (stripped.startswith("|") or stripped.endswith("|"))
+
+
+def _extract_table_label_parts(line: str) -> tuple[str, str] | None:
+    match = _TABLE_LABEL_CAPTURE_RE.match(line.strip())
+    if match is None:
+        return None
+    return match.group(1).strip(), match.group(2).strip()
+
+
+def _extract_page_label_candidates(page: fitz.Page) -> list[tuple[fitz.Rect, str, str]]:
+    candidates: list[tuple[fitz.Rect, str, str]] = []
+    try:
+        blocks = page.get_text("blocks")
+    except Exception:
+        return candidates
+    for block in blocks:
+        rect = fitz.Rect(block[:4])
+        block_text = str(block[4] or "").strip()
+        block_type = block[6] if len(block) > 6 else 0
+        if block_type != 0 or not block_text:
+            continue
+        for line in block_text.splitlines():
+            label_parts = _extract_table_label_parts(line.strip())
+            if label_parts is None:
+                continue
+            candidates.append((rect, label_parts[0], label_parts[1]))
+    return candidates
+
+
+def _resolve_table_label_for_rect(
+    table_rect: fitz.Rect,
+    label_candidates: list[tuple[fitz.Rect, str, str]],
+) -> tuple[str, str] | None:
+    best_match: tuple[float, tuple[str, str]] | None = None
+    for candidate_rect, label_text, label_number in label_candidates:
+        if candidate_rect.y1 > table_rect.y0 + 40:
+            continue
+        vertical_gap = table_rect.y0 - candidate_rect.y1
+        if vertical_gap < 0 or vertical_gap > 180:
+            continue
+        horizontal_overlap = max(0.0, min(table_rect.x1, candidate_rect.x1) - max(table_rect.x0, candidate_rect.x0))
+        if horizontal_overlap <= 0:
+            continue
+        score = vertical_gap - min(horizontal_overlap, 200.0) / 1000.0
+        if best_match is None or score < best_match[0]:
+            best_match = (score, (label_text, label_number))
+    return None if best_match is None else best_match[1]
+
+
+def _extract_markdown_table_grounding(markdown_text: str, page_count: int | None) -> dict[str, object]:
+    lines = markdown_text.splitlines()
+    current_page = 1 if page_count else None
+    page_table_counts: dict[int, int] = {}
+    table_regions: list[dict[str, object]] = []
+    table_label_pages: dict[str, int] = {}
+    table_label_positions: dict[str, dict[str, int]] = {}
+    global_index = 0
+    pending_label: tuple[str, str] | None = None
+    index = 0
+    while index < len(lines):
+        raw_line = lines[index]
+        stripped = raw_line.strip()
+        page_match = _PAGE_MARKER_RE.match(stripped)
+        if page_match is not None:
+            current_page = int(page_match.group(1))
+            pending_label = None
+            index += 1
+            continue
+        label_parts = _extract_table_label_parts(stripped)
+        if label_parts is not None:
+            pending_label = label_parts
+            index += 1
+            continue
+        if index + 1 < len(lines) and _is_markdown_table_row(stripped) and _is_markdown_table_separator(lines[index + 1]):
+            table_lines = [lines[index]]
+            row_count = 1
+            col_count = len(_split_markdown_table_cells(lines[index]))
+            cursor = index + 2
+            while cursor < len(lines) and _is_markdown_table_row(lines[cursor].strip()):
+                table_lines.append(lines[cursor])
+                row_count += 1
+                cursor += 1
+            page_number = current_page if current_page is not None else 1
+            page_table_counts[page_number] = page_table_counts.get(page_number, 0) + 1
+            region_index = page_table_counts[page_number]
+            global_index += 1
+            label_text = pending_label[0] if pending_label is not None else None
+            label_number = pending_label[1] if pending_label is not None else None
+            table_region: dict[str, object] = {
+                "table_id": f"p{page_number}-t{region_index}",
+                "page": page_number,
+                "row_count": row_count,
+                "col_count": col_count,
+                "extraction_mode": "markdown",
+            }
+            if label_text is not None:
+                table_region["label"] = label_text
+                table_label_pages.setdefault(label_text, page_number)
+                table_label_positions.setdefault(
+                    label_text,
+                    {"page": page_number, "region_index": region_index, "global_index": global_index},
+                )
+            if label_number is not None:
+                table_label_pages.setdefault(label_number, page_number)
+                table_label_positions.setdefault(
+                    label_number,
+                    {"page": page_number, "region_index": region_index, "global_index": global_index},
+                )
+            table_regions.append(table_region)
+            pending_label = None
+            index = cursor
+            continue
+        if stripped:
+            pending_label = None
+        index += 1
+    return {
+        "table_regions": table_regions,
+        "table_label_pages": table_label_pages,
+        "table_label_positions": table_label_positions,
+        "table_format": "markdown",
+    }
+
+
+def _extract_pdf_table_grounding_metadata(source: DocumentSource) -> dict[str, object]:
+    if not _is_pdf_source(source):
+        return {
+            "table_regions": [],
+            "table_label_pages": {},
+            "table_label_positions": {},
+        }
+    table_regions: list[dict[str, object]] = []
+    table_label_pages: dict[str, int] = {}
+    table_label_positions: dict[str, dict[str, int]] = {}
+    global_index = 0
+    try:
+        with fitz.open(source.path) as document:
+            for page_index, page in enumerate(document, start=1):
+                label_candidates = _extract_page_label_candidates(page)
+                page_table_index = 0
+                if not hasattr(page, "find_tables"):
+                    continue
+                try:
+                    table_finder = page.find_tables()
+                except Exception:
+                    continue
+                for table in getattr(table_finder, "tables", []) if table_finder is not None else []:
+                    if not getattr(table, "bbox", None):
+                        continue
+                    rows = table.extract() or []
+                    if not rows:
+                        continue
+                    rect = fitz.Rect(table.bbox)
+                    page_table_index += 1
+                    global_index += 1
+                    col_count = getattr(table, "col_count", None) or max(len(row) for row in rows)
+                    row_count = len(rows)
+                    table_region: dict[str, object] = {
+                        "table_id": f"p{page_index}-t{page_table_index}",
+                        "page": page_index,
+                        "bbox": [float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)],
+                        "row_count": row_count,
+                        "col_count": col_count,
+                        "extraction_mode": "grounding",
+                    }
+                    label_parts = _resolve_table_label_for_rect(rect, label_candidates)
+                    if label_parts is not None:
+                        label_text, label_number = label_parts
+                        table_region["label"] = label_text
+                        table_label_pages.setdefault(label_text, page_index)
+                        table_label_pages.setdefault(label_number, page_index)
+                        position_payload = {
+                            "page": page_index,
+                            "region_index": page_table_index,
+                            "global_index": global_index,
+                        }
+                        table_label_positions.setdefault(label_text, position_payload)
+                        table_label_positions.setdefault(label_number, position_payload)
+                    table_regions.append(table_region)
+    except Exception:
+        return {
+            "table_regions": [],
+            "table_label_pages": {},
+            "table_label_positions": {},
+        }
+    return {
+        "table_regions": table_regions,
+        "table_label_pages": table_label_pages,
+        "table_label_positions": table_label_positions,
+    }
+
+
+def _merge_table_grounding_metadata(
+    primary: dict[str, object],
+    secondary: dict[str, object],
+) -> dict[str, object]:
+    merged_regions = list(primary.get("table_regions", []))
+    if not merged_regions:
+        merged_regions = list(secondary.get("table_regions", []))
+    merged_label_pages = dict(secondary.get("table_label_pages", {}))
+    merged_label_pages.update(primary.get("table_label_pages", {}))
+    merged_label_positions = dict(secondary.get("table_label_positions", {}))
+    merged_label_positions.update(primary.get("table_label_positions", {}))
+    merged: dict[str, object] = {
+        "table_regions": merged_regions,
+        "table_label_pages": merged_label_pages,
+        "table_label_positions": merged_label_positions,
+    }
+    if "table_format" in primary:
+        merged["table_format"] = primary["table_format"]
+    elif "table_format" in secondary:
+        merged["table_format"] = secondary["table_format"]
+    return merged
 
 
 def _rows_to_markdown(rows: list[list[object]]) -> str:
@@ -780,16 +1018,24 @@ class OpenDataLoaderPdfParserAdapter(ParserAdapter):
             if not markdown_paths:
                 raise ValueError(f"OpenDataLoader did not emit markdown output for {source.path}")
             return [
-                ParseCandidate(
-                    parser_name=self.name,
-                    content=markdown_text,
-                    format_name="md",
-                    metadata={
-                        "candidate_index": index,
-                        "emitted_name": markdown_path.name,
-                        "embedded_image_data_urls": _extract_markdown_image_data_urls(markdown_text, markdown_path),
-                    },
-                    source_path=source.path,
+                (
+                    lambda grounding: ParseCandidate(
+                        parser_name=self.name,
+                        content=markdown_text,
+                        format_name="md",
+                        metadata={
+                            "candidate_index": index,
+                            "emitted_name": markdown_path.name,
+                            "embedded_image_data_urls": _extract_markdown_image_data_urls(markdown_text, markdown_path),
+                            **grounding,
+                        },
+                        source_path=source.path,
+                    )
+                )(
+                    _merge_table_grounding_metadata(
+                        _extract_markdown_table_grounding(markdown_text, source.page_count),
+                        _extract_pdf_table_grounding_metadata(source),
+                    )
                 )
                 for index, markdown_path in enumerate(markdown_paths)
                 for markdown_text in [_read_text_with_fallback(markdown_path)]

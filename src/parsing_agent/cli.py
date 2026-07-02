@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-repair-rounds",
         type=int,
-        default=1,
+        default=WorkflowConfig().max_repair_rounds,
         help="Maximum number of repair and re-evaluation rounds per candidate.",
     )
     parser.add_argument(

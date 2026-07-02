@@ -26,6 +26,8 @@ class DocumentSource:
     run_id: str
     extracted_text: str | None = None
     page_count: int | None = None
+    ocr_metadata: dict[str, Any] = field(default_factory=dict)
+    ocr_artifacts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -63,6 +65,7 @@ class JudgeResult:
     editorial_readiness: float | None = None
     notes: list[str] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
+    table_findings: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property

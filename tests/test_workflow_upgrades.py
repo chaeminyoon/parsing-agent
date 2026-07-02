@@ -14,7 +14,7 @@ from parsing_agent.models import (
     WorkflowResult,
 )
 from parsing_agent.parsers import OpenDataLoaderPdfParserAdapter, build_default_parser_registry
-from parsing_agent.repair import HeuristicRepairer
+from parsing_agent.repair import HeuristicRepairer, identify_repair_targets
 from parsing_agent.visual_repair import OpenAIVisualTableRecoverer, VisualRepairTask
 from parsing_agent.repair import RepairTarget
 from parsing_agent.workflow import WorkflowRunner, WorkflowState
@@ -152,7 +152,7 @@ def test_workflow_runner_report_includes_quality_gate_and_monitoring(tmp_path, m
         page_count=None,
     )
     source.path.write_text("source text", encoding="utf-8")
-    monkeypatch.setattr("parsing_agent.workflow.build_document_source", lambda path, run_id: source)
+    monkeypatch.setattr("parsing_agent.workflow.build_document_source", lambda path, run_id, **kwargs: source)
 
     runner = WorkflowRunner(
         config=WorkflowConfig(
@@ -193,6 +193,14 @@ def test_cli_parser_does_not_expose_fallback_parser_option() -> None:
     assert "--fallback-parser" not in option_strings
 
 
+def test_cli_parser_uses_workflow_config_default_for_max_repair_rounds() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["sample.txt"])
+
+    assert args.max_repair_rounds == WorkflowConfig().max_repair_rounds
+
+
 def test_workflow_result_does_not_expose_candidates_field() -> None:
     assert "candidates" not in WorkflowResult.__dataclass_fields__
 
@@ -211,7 +219,7 @@ def test_workflow_runner_does_not_enrich_candidate_during_finalize(tmp_path, mon
         page_count=None,
     )
     source.path.write_text(source.extracted_text, encoding="utf-8")
-    monkeypatch.setattr("parsing_agent.workflow.build_document_source", lambda path, run_id: source)
+    monkeypatch.setattr("parsing_agent.workflow.build_document_source", lambda path, run_id, **kwargs: source)
     monkeypatch.setattr(
         "parsing_agent.enrichment._post_response",
         lambda payload, config, timeout_seconds: {"output_text": "Site layout overview"},
@@ -255,7 +263,7 @@ def test_workflow_runner_does_not_re_evaluate_metrics_during_finalize(tmp_path, 
         page_count=None,
     )
     source.path.write_text(source.extracted_text, encoding="utf-8")
-    monkeypatch.setattr("parsing_agent.workflow.build_document_source", lambda path, run_id: source)
+    monkeypatch.setattr("parsing_agent.workflow.build_document_source", lambda path, run_id, **kwargs: source)
     monkeypatch.setattr(
         "parsing_agent.enrichment._post_response",
         lambda payload, config, timeout_seconds: {"output_text": "Site layout overview"},
@@ -292,7 +300,7 @@ def test_workflow_runner_writes_accuracy_snapshots_for_initial_and_repaired_iter
         page_count=None,
     )
     source.path.write_text("bad content", encoding="utf-8")
-    monkeypatch.setattr("parsing_agent.workflow.build_document_source", lambda path, run_id: source)
+    monkeypatch.setattr("parsing_agent.workflow.build_document_source", lambda path, run_id, **kwargs: source)
 
     runner = WorkflowRunner(
         config=WorkflowConfig(
@@ -470,11 +478,11 @@ def test_inspect_repair_targets_routes_text_and_table_issues() -> None:
     assert (TABLE_ISSUE_MISSING_HEADER, "recover_tables_from_pdf_image") in routed_pairs
 
 
-def test_inspect_and_route_always_flow_into_repair() -> None:
+def test_route_without_repair_plan_finalizes() -> None:
     runner = WorkflowRunner(config=WorkflowConfig(judge_weight=0, langsmith_tracing=False))
 
     assert runner._route_after_quality_inspection({"repair_targets": []}) == "route"
-    assert runner._route_after_repair_strategy({"repair_plan": []}) == "repair"
+    assert runner._route_after_repair_strategy({"repair_plan": []}) == "finalize"
 
 
 def test_workflow_state_excludes_legacy_graph_fields() -> None:
@@ -513,6 +521,185 @@ def test_route_repair_strategy_builds_explicit_strategy_steps() -> None:
     assert [step.route_name for step in plan] == ["merge_wrapped_lines", "recover_tables_from_pdf_image"]
     assert [target.issue_type for target in plan[0].targets] == ["wrapped_line_noise"]
     assert [target.issue_type for target in plan[1].targets] == [TABLE_ISSUE_MISSING_HEADER]
+
+
+def test_inspect_preserves_structured_table_finding_payload_in_repair_targets() -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="inspect-structured-targets",
+        extracted_text="source text",
+        page_count=12,
+    )
+    candidate = ParseCandidate(
+        parser_name="opendataloader-pdf",
+        content="표 4.2-2\nbroken table",
+        format_name="md",
+        source_path=source.path,
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.8,
+        normalized_similarity=0.8,
+        structure_retention=0.8,
+        table_preservation=0.4,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+        table_issues=[TABLE_ISSUE_MISSING_HEADER],
+        judge_result=JudgeResult(
+            overall_score=0.8,
+            table_findings=[
+                {"issue_type": TABLE_ISSUE_MISSING_HEADER, "table_label": "표 4.2-2", "page_number": 4}
+            ],
+        ),
+    )
+
+    targets = identify_repair_targets(source, candidate, metrics)
+
+    table_targets = [target for target in targets if target.issue_type == TABLE_ISSUE_MISSING_HEADER]
+    assert len(table_targets) == 1
+    assert table_targets[0].table_label == "표 4.2-2"
+    assert table_targets[0].page_number == 4
+    assert table_targets[0].source_name == "judge_table_finding"
+
+
+def test_inspect_synthesizes_table_targets_from_parser_metadata_when_judge_findings_are_missing() -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="inspect-synthetic-table-targets",
+        extracted_text="source text",
+        page_count=12,
+    )
+    candidate = ParseCandidate(
+        parser_name="opendataloader-pdf",
+        content="broken table",
+        format_name="md",
+        source_path=source.path,
+        metadata={
+            "table_regions": [
+                {"page_number": 4, "label": "??4.2-2", "table_id": "page-4-table-1"},
+            ]
+        },
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.8,
+        normalized_similarity=0.8,
+        structure_retention=0.8,
+        table_preservation=0.4,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+        table_issues=[TABLE_ISSUE_MISSING_HEADER],
+    )
+
+    targets = identify_repair_targets(source, candidate, metrics)
+
+    table_targets = [target for target in targets if target.issue_type == TABLE_ISSUE_MISSING_HEADER]
+    assert any(target.source_name == "parser_table_region" for target in table_targets)
+    assert any(target.table_label == "??4.2-2" and target.page_number == 4 for target in table_targets)
+
+
+def test_route_repair_strategy_preserves_structured_visual_target_payload() -> None:
+    runner = WorkflowRunner(config=WorkflowConfig(judge_weight=0, langsmith_tracing=False))
+
+    result = runner._route_repair_strategy_node(
+        {
+            "repair_targets": [
+                RepairTarget(
+                    target_kind="table",
+                    issue_type=TABLE_ISSUE_MISSING_HEADER,
+                    route_name="recover_tables_from_pdf_image",
+                    description="recover table",
+                    table_label="표 4.2-2",
+                    page_number=4,
+                    source_name="judge_table_finding",
+                ),
+            ]
+        }
+    )
+
+    plan = result["repair_plan"]
+    assert len(plan) == 1
+    assert plan[0].strategy == "visual_table_repair"
+    assert plan[0].targets[0].table_label == "표 4.2-2"
+    assert plan[0].targets[0].page_number == 4
+    assert plan[0].targets[0].source_name == "judge_table_finding"
+
+
+def test_route_prioritizes_visual_repair_after_stalled_snapshot_delta() -> None:
+    runner = WorkflowRunner(config=WorkflowConfig(judge_weight=0, langsmith_tracing=False))
+
+    result = runner._route_repair_strategy_node(
+        {
+            "iteration_count": 1,
+            "accuracy_snapshots": [
+                {"metrics": {"total_score": 0.50}},
+                {"metrics": {"total_score": 0.505}},
+            ],
+            "repair_targets": [
+                RepairTarget(
+                    target_kind="text",
+                    issue_type="wrapped_line_noise",
+                    route_name="merge_wrapped_lines",
+                    description="merge wrapped lines",
+                ),
+                RepairTarget(
+                    target_kind="table",
+                    issue_type=TABLE_ISSUE_MISSING_HEADER,
+                    route_name="recover_tables_from_pdf_image",
+                    description="recover table",
+                ),
+            ],
+        }
+    )
+
+    plan = result["repair_plan"]
+    assert [step.strategy for step in plan] == ["visual_table_repair", "heuristic"]
+
+
+def test_route_skips_repeated_heuristic_after_stalled_snapshot_delta() -> None:
+    runner = WorkflowRunner(config=WorkflowConfig(judge_weight=0, langsmith_tracing=False))
+
+    result = runner._route_repair_strategy_node(
+        {
+            "iteration_count": 1,
+            "accuracy_snapshots": [
+                {"metrics": {"total_score": 0.50}},
+                {"metrics": {"total_score": 0.505}},
+            ],
+            "repairs": [
+                RepairAction(
+                    action_name="merge_wrapped_lines",
+                    description="Merge lines",
+                    before_excerpt="a",
+                    after_excerpt="b",
+                    issue_type="wrapped_line_noise",
+                    route_name="merge_wrapped_lines",
+                )
+            ],
+            "repair_targets": [
+                RepairTarget(
+                    target_kind="text",
+                    issue_type="wrapped_line_noise",
+                    route_name="merge_wrapped_lines",
+                    description="merge wrapped lines",
+                ),
+                RepairTarget(
+                    target_kind="table",
+                    issue_type=TABLE_ISSUE_MISSING_HEADER,
+                    route_name="recover_tables_from_pdf_image",
+                    description="recover table",
+                ),
+            ],
+        }
+    )
+
+    plan = result["repair_plan"]
+    assert len(plan) == 1
+    assert plan[0].strategy == "visual_table_repair"
 
 
 def test_parse_document_preserves_embedded_image_data_urls() -> None:
@@ -786,6 +973,51 @@ def test_externalize_source_text_keeps_it_out_of_graph_state() -> None:
     assert restored_source.extracted_text == "source body"
 
 
+def test_langsmith_client_hides_graph_payloads_and_keeps_source_summary(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Client:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("parsing_agent.workflow.Client", _Client)
+    runner = WorkflowRunner(
+        config=WorkflowConfig(
+            langsmith_tracing=True,
+            langsmith_api_key="test-key",
+            langsmith_hide_inputs=True,
+            langsmith_hide_outputs=True,
+        )
+    )
+    source = DocumentSource(
+        path=Path("large-report.pdf"),
+        media_type="application/pdf",
+        size_bytes=42_000_000,
+        run_id="run-1",
+        extracted_text="document body",
+        page_count=120,
+    )
+
+    compact_source = runner._externalize_source_text(source)
+    metadata = runner._langsmith_metadata(compact_source)
+    runner._build_langsmith_client()
+
+    assert callable(captured["hide_inputs"])
+    assert callable(captured["hide_outputs"])
+    assert metadata["source_filename"] == "large-report.pdf"
+    assert metadata["source_size_bytes"] == 42_000_000
+    assert metadata["source_text_character_count"] == len("document body")
+    assert metadata["trace_payload_policy"] == "summary_only"
+    assert "source_path" not in metadata
+
+    payload_summary = captured["hide_outputs"](
+        {"candidate": ParseCandidate("parser", "very large body", "md")}
+    )
+    candidate_summary = payload_summary["fields"]["candidate"]
+    assert candidate_summary["content_character_count"] == len("very large body")
+    assert "very large body" not in str(payload_summary)
+
+
 def test_opendataloader_parser_runs_converter_in_quiet_mode(tmp_path: Path) -> None:
     converter_calls: list[dict[str, object]] = []
 
@@ -809,5 +1041,70 @@ def test_opendataloader_parser_runs_converter_in_quiet_mode(tmp_path: Path) -> N
 
     assert converter_calls
     assert converter_calls[0]["quiet"] is True
+
+
+def test_opendataloader_parser_extracts_table_grounding_metadata(tmp_path: Path) -> None:
+    def fake_converter(**kwargs):
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "sample.md").write_text(
+            "\n".join(
+                [
+                    "<!-- page 3 -->",
+                    "표 4.2-2",
+                    "",
+                    "| 항목 | 값 |",
+                    "| --- | --- |",
+                    "| A | 1 |",
+                    "",
+                    "<!-- page 4 -->",
+                    "표 4.2-3",
+                    "",
+                    "| 항목 | 값 |",
+                    "| --- | --- |",
+                    "| B | 2 |",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    parser = OpenDataLoaderPdfParserAdapter(converter=fake_converter)
+    source = DocumentSource(
+        path=tmp_path / "sample.pdf",
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="metadata-opendataloader",
+        extracted_text="source",
+        page_count=4,
+    )
+    source.path.write_bytes(b"%PDF-1.4")
+
+    candidates = parser.parse(source, WorkflowConfig(judge_weight=0, langsmith_tracing=False))
+
+    candidate = candidates[0]
+    assert candidate.metadata["table_format"] == "markdown"
+    assert candidate.metadata["table_label_pages"]["표 4.2-2"] == 3
+    assert candidate.metadata["table_label_pages"]["4.2-2"] == 3
+    assert candidate.metadata["table_label_pages"]["표 4.2-3"] == 4
+    assert candidate.metadata["table_label_positions"]["표 4.2-2"]["page"] == 3
+    assert candidate.metadata["table_label_positions"]["표 4.2-3"]["page"] == 4
+    assert candidate.metadata["table_regions"] == [
+        {
+            "table_id": "p3-t1",
+            "page": 3,
+            "row_count": 2,
+            "col_count": 2,
+            "label": "표 4.2-2",
+            "extraction_mode": "markdown",
+        },
+        {
+            "table_id": "p4-t1",
+            "page": 4,
+            "row_count": 2,
+            "col_count": 2,
+            "label": "표 4.2-3",
+            "extraction_mode": "markdown",
+        },
+    ]
 
 

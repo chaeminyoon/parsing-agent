@@ -59,6 +59,22 @@ class _FanoutRepairer(HeuristicRepairer):
         return updated, action
 
 
+class _RaisingVisualRecoverer:
+    def recover_task(self, source, candidate_content, task):
+        del source, candidate_content, task
+        raise ValueError("bad visual repair payload")
+
+
+class _TrackingVisualRecoverer:
+    def __init__(self) -> None:
+        self.called = False
+
+    def recover_task(self, source, candidate_content, task):
+        del source, candidate_content, task
+        self.called = True
+        return None
+
+
 def test_repair_fanout_routes_chunk_tasks_and_merges_results() -> None:
     runner = WorkflowRunner(
         config=WorkflowConfig(judge_weight=0, repair_fanout_max_tasks=4),
@@ -186,3 +202,148 @@ def test_merge_repair_chunks_targets_indexed_page_scoped_table() -> None:
     assert "| old | first |" in pending_candidate.content
     assert "| new | second |" in pending_candidate.content
     assert "| old | second |" not in pending_candidate.content
+
+
+def test_apply_chunk_repair_returns_none_when_visual_recoverer_raises() -> None:
+    repairer = HeuristicRepairer(visual_table_recoverer=_RaisingVisualRecoverer())
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="visual-repair-exception",
+        extracted_text="source",
+        page_count=2,
+    )
+    candidate = ParseCandidate(
+        parser_name="opendataloader-pdf",
+        content="broken table",
+        format_name="md",
+    )
+    task = VisualRepairTask(
+        task_id="task-1",
+        table_label="table 4.2-2",
+        page_number=1,
+        issue_types=(TABLE_ISSUE_MERGED_CELL_LOSS,),
+    )
+
+    result = repairer.apply_chunk_repair(source, candidate, task)
+
+    assert result is None
+
+
+def test_apply_chunk_repair_skips_out_of_range_page_without_calling_recoverer() -> None:
+    recoverer = _TrackingVisualRecoverer()
+    repairer = HeuristicRepairer(visual_table_recoverer=recoverer)
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="visual-repair-page-range",
+        extracted_text="source",
+        page_count=1,
+    )
+    candidate = ParseCandidate(
+        parser_name="opendataloader-pdf",
+        content="broken table",
+        format_name="md",
+    )
+    task = VisualRepairTask(
+        task_id="task-2",
+        table_label="__page_table__:2",
+        page_number=2,
+        issue_types=(TABLE_ISSUE_NUMERIC_TOKEN_BREAK,),
+    )
+
+    result = repairer.apply_chunk_repair(source, candidate, task)
+
+    assert result is None
+    assert recoverer.called is False
+
+
+class _RetryAwareRepairer(HeuristicRepairer):
+    def __init__(self) -> None:
+        super().__init__(visual_table_recoverer=None)
+        self.applied_labels: list[str] = []
+
+    def repair_heuristics(self, source, candidate, metrics, targets=None):
+        del source, metrics, targets
+        return candidate, []
+
+    def plan_chunk_repairs(self, source, candidate, metrics, max_tasks, targets=None):
+        del source, candidate, metrics, max_tasks, targets
+        return [
+            VisualRepairTask(
+                task_id="task-repeat",
+                table_label="표 4.2-2",
+                page_number=4,
+                issue_types=(TABLE_ISSUE_MERGED_CELL_LOSS,),
+                preferred_output_format="html",
+            )
+        ]
+
+    def apply_chunk_repair(self, source, candidate, task):
+        del source, candidate
+        self.applied_labels.append(task.table_label)
+        return None
+
+
+def test_repair_candidate_skips_previously_failed_visual_task() -> None:
+    repairer = _RetryAwareRepairer()
+    runner = WorkflowRunner(
+        config=WorkflowConfig(judge_weight=0, repair_fanout_max_tasks=4),
+        repairer=repairer,
+    )
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="visual-retry-skip",
+        extracted_text="source",
+        page_count=10,
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.8,
+        normalized_similarity=0.8,
+        structure_retention=0.8,
+        table_preservation=0.4,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.4,
+        table_issues=[TABLE_ISSUE_MERGED_CELL_LOSS],
+    )
+    candidate = ParseCandidate(
+        parser_name="opendataloader-pdf",
+        content="broken table",
+        format_name="md",
+    )
+
+    prepared = runner._repair_candidate_node(
+        {
+            "source": source,
+            "candidate": candidate,
+            "metrics": metrics,
+            "iteration_count": 1,
+            "repairs": [],
+                "failed_visual_task_keys": ["표 4.2-2|4|merged_cell_loss"],
+            "repair_plan": [
+                RepairPlanStep(
+                    strategy="visual_table_repair",
+                    route_name="recover_tables_from_pdf_image",
+                    targets=(
+                        RepairTarget(
+                            target_kind="table",
+                            issue_type="table_merged_cell_loss",
+                            route_name="recover_tables_from_pdf_image",
+                            description="recover tables",
+                            table_label="표 4.2-2",
+                            page_number=4,
+                            source_name="judge_table_finding",
+                        ),
+                    ),
+                )
+            ],
+        }
+    )
+
+    assert repairer.applied_labels == []
+    assert prepared["failed_visual_task_keys"] == ["표 4.2-2|4|merged_cell_loss"]

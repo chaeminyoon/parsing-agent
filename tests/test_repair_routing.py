@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from parsing_agent.evaluation import TABLE_ISSUE_MERGED_CELL_LOSS
+from parsing_agent.evaluation import TABLE_ISSUE_MERGED_CELL_LOSS, TABLE_ISSUE_MISSING_HEADER
 from parsing_agent.models import DocumentSource, EvaluationMetrics, JudgeResult, ParseCandidate, RepairAction
-from parsing_agent.repair import HeuristicRepairer
+from parsing_agent.repair import HeuristicRepairer, RepairTarget
 import fitz
 
 from parsing_agent.visual_repair import (
@@ -119,6 +119,159 @@ def test_repairer_recovers_key_value_table_text_blocks() -> None:
     assert "reconstruct_table_blocks" in repaired.metadata["repair_routes"]
 
 
+def test_repairer_recovers_missing_structured_source_lines_when_text_coverage_is_low() -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="run-coverage-repair",
+        extracted_text=(
+            "1. 사업개요\n"
+            "본 사업은 광양항 일원에서 수행된다.\n"
+            "표 4.2-2 총괄\n"
+            "세부 내용\n"
+        ),
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.5,
+        normalized_similarity=0.7,
+        structure_retention=0.5,
+        table_preservation=0.8,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+    )
+    candidate = ParseCandidate(
+        parser_name="mock",
+        content="본 사업은 광양항 일원에서 수행된다.\n세부 내용\n",
+        format_name="md",
+        source_path=source.path,
+    )
+
+    repaired, actions = HeuristicRepairer().repair_heuristics(source, candidate, metrics)
+
+    assert "1. 사업개요" in repaired.content
+    assert "표 4.2-2 총괄" in repaired.content
+    assert any(action.route_name == "recover_missing_source_lines" for action in actions)
+
+
+def test_repairer_removes_repeated_pdf_headers_and_footers() -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="run-pdf-dedupe",
+        extracted_text="source text",
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.8,
+        normalized_similarity=0.8,
+        structure_retention=0.6,
+        table_preservation=0.8,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.2,
+        total_score=0.0,
+    )
+    candidate = ParseCandidate(
+        parser_name="mock",
+        content=(
+            "<!-- page 1 -->\n"
+            "환경영향평가서\n"
+            "1. 사업개요\n"
+            "본문 1\n"
+            "환경영향평가서\n"
+            "<!-- page 2 -->\n"
+            "환경영향평가서\n"
+            "2. 지역현황\n"
+            "본문 2\n"
+            "환경영향평가서\n"
+        ),
+        format_name="md",
+        source_path=source.path,
+    )
+
+    repaired, actions = HeuristicRepairer().repair_heuristics(source, candidate, metrics)
+
+    assert "환경영향평가서" not in repaired.content
+    assert any(action.route_name == "deduplicate_pdf_headers" for action in actions)
+
+
+def test_repairer_does_not_merge_page_footers_or_pdf_sections() -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="run-pdf-merge-guards",
+        extracted_text="source text",
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.8,
+        normalized_similarity=0.8,
+        structure_retention=1.0,
+        table_preservation=0.8,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+    )
+    candidate = ParseCandidate(
+        parser_name="mock",
+        content=(
+            "-21-\n"
+            "第 4 章 環境影響要素 및 環境因子行列式對照表\n"
+            "가. 建設段階\n"
+            "(1) 海岸, 海底地形의 變形\n"
+            "wrapped English line\n"
+            "continues here\n"
+        ),
+        format_name="md",
+        source_path=source.path,
+    )
+
+    repaired, actions = HeuristicRepairer().repair_heuristics(source, candidate, metrics)
+
+    assert "-21-\n第 4 章" in repaired.content
+    assert "가. 建設段階\n(1)" in repaired.content
+    assert "wrapped English line continues here" in repaired.content
+    assert any(action.route_name == "merge_wrapped_lines" for action in actions)
+
+
+def test_repairer_restores_pdf_boundaries_around_headings_and_lists() -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="run-pdf-structure",
+        extracted_text="source text",
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.8,
+        normalized_similarity=0.8,
+        structure_retention=0.5,
+        table_preservation=0.8,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+    )
+    candidate = ParseCandidate(
+        parser_name="mock",
+        content=(
+            "<!-- page 1 -->\n"
+            "1. 사업개요\n"
+            "본문 첫줄\n"
+            "가. 세부항목\n"
+            "세부 설명\n"
+        ),
+        format_name="md",
+        source_path=source.path,
+    )
+
+    repaired, actions = HeuristicRepairer().repair_heuristics(source, candidate, metrics)
+
+    assert "1. 사업개요\n\n본문 첫줄" in repaired.content
+    assert "가. 세부항목\n\n세부 설명" in repaired.content
+    assert any(action.route_name == "restore_pdf_boundaries" for action in actions)
+
+
 def test_extract_table_labels_deduplicates_judge_issues() -> None:
     labels = extract_table_labels(
         [
@@ -194,6 +347,20 @@ def test_normalize_recovered_table_markup_fixes_units_and_decimal_commas() -> No
     assert "잔여 매립 가능량(㎥)" in normalized
     assert "면적(㎢)" in normalized
     assert "443.1" in normalized
+
+
+def test_normalize_recovered_table_markup_converts_html_spans_to_markdown() -> None:
+    normalized = _normalize_recovered_table_markup(
+        "<table>"
+        "<tr><th rowspan=\"2\">group</th><th colspan=\"2\">plan</th></tr>"
+        "<tr><th>area</th><th>ratio</th></tr>"
+        "<tr><td>total</td><td>10</td><td>100</td></tr>"
+        "</table>"
+    )
+
+    assert "<table" not in normalized
+    assert "| group | plan / area | plan / ratio |" in normalized
+    assert "| total | 10 | 100 |" in normalized
 
 
 def test_replace_table_block_replaces_broken_section_after_caption() -> None:
@@ -588,6 +755,189 @@ def test_visual_repair_tasks_use_support_label_page_hints_when_pdf_lookup_fails(
     assert tasks[0].page_number == 6
 
 
+def test_visual_repair_tasks_prefer_structured_table_findings_over_issue_text(monkeypatch) -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="run-task-structured-findings",
+        extracted_text="source text",
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.9,
+        normalized_similarity=0.9,
+        structure_retention=0.9,
+        table_preservation=0.4,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+        table_issues=[TABLE_ISSUE_MISSING_HEADER],
+        judge_result=JudgeResult(
+            overall_score=0.8,
+            issues=["ambiguous free-form issue text"],
+            table_findings=[
+                {"issue_type": TABLE_ISSUE_MISSING_HEADER, "table_label": "표 4.2-2", "page_number": 4}
+            ],
+        ),
+    )
+    recoverer = OpenAIVisualTableRecoverer(model="test", api_key="test")
+    monkeypatch.setattr(
+        recoverer,
+        "_find_page_number",
+        lambda path, table_label: (_ for _ in ()).throw(AssertionError("structured page_number should be used first")),
+    )
+
+    tasks = recoverer.plan_tasks(source, "표 4.2-2\nbroken table", metrics, candidate_metadata={})
+
+    assert len(tasks) == 1
+    assert tasks[0].table_label == "표 4.2-2"
+    assert tasks[0].page_number == 4
+
+
+def test_visual_repair_tasks_prefer_structured_repair_targets_over_judge_findings(monkeypatch) -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="run-task-structured-targets",
+        extracted_text="source text",
+        page_count=12,
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.9,
+        normalized_similarity=0.9,
+        structure_retention=0.9,
+        table_preservation=0.4,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+        table_issues=[TABLE_ISSUE_MISSING_HEADER],
+        judge_result=JudgeResult(
+            overall_score=0.8,
+            issues=["free-form issue text"],
+            table_findings=[
+                {"issue_type": TABLE_ISSUE_MISSING_HEADER, "table_label": "표 4.2-2", "page_number": 9}
+            ],
+        ),
+    )
+    recoverer = OpenAIVisualTableRecoverer(model="test", api_key="test")
+    monkeypatch.setattr(
+        recoverer,
+        "_find_page_number",
+        lambda path, table_label: (_ for _ in ()).throw(AssertionError("repair target page should be used first")),
+    )
+
+    tasks = recoverer.plan_tasks(
+        source,
+        "표 4.2-2\nbroken table",
+        metrics,
+        candidate_metadata={},
+        repair_targets=[
+            RepairTarget(
+                target_kind="table",
+                issue_type=TABLE_ISSUE_MISSING_HEADER,
+                route_name="recover_tables_from_pdf_image",
+                description="recover table",
+                table_label="표 4.2-2",
+                page_number=4,
+                source_name="judge_table_finding",
+            )
+        ],
+    )
+
+    assert len(tasks) == 1
+    assert tasks[0].table_label == "표 4.2-2"
+    assert tasks[0].page_number == 4
+
+
+def test_visual_repair_tasks_use_page_scoped_synthetic_targets_when_label_is_missing() -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="run-task-synthetic-targets",
+        extracted_text="source text",
+        page_count=12,
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.9,
+        normalized_similarity=0.9,
+        structure_retention=0.9,
+        table_preservation=0.4,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+        table_issues=[TABLE_ISSUE_MISSING_HEADER],
+    )
+    recoverer = OpenAIVisualTableRecoverer(model="test", api_key="test")
+
+    tasks = recoverer.plan_tasks(
+        source,
+        "broken table",
+        metrics,
+        candidate_metadata={},
+        repair_targets=[
+            RepairTarget(
+                target_kind="table",
+                issue_type=TABLE_ISSUE_MISSING_HEADER,
+                route_name="recover_tables_from_pdf_image",
+                description="recover table",
+                table_label=None,
+                page_number=4,
+                source_name="parser_table_region",
+            )
+        ],
+    )
+
+    assert len(tasks) == 1
+    assert tasks[0].page_number == 4
+    assert tasks[0].table_label.startswith("__page_table__:")
+
+
+def test_visual_repair_tasks_correct_invalid_structured_page_number_with_metadata() -> None:
+    source = DocumentSource(
+        path=Path("sample.pdf"),
+        media_type="application/pdf",
+        size_bytes=0,
+        run_id="run-task-structured-page-fix",
+        extracted_text="source text",
+        page_count=12,
+    )
+    metrics = EvaluationMetrics(
+        text_coverage=0.9,
+        normalized_similarity=0.9,
+        structure_retention=0.9,
+        table_preservation=0.4,
+        empty_block_penalty=0.0,
+        repetition_penalty=0.0,
+        total_score=0.0,
+        table_issues=[TABLE_ISSUE_MISSING_HEADER],
+    )
+    recoverer = OpenAIVisualTableRecoverer(model="test", api_key="test")
+
+    tasks = recoverer.plan_tasks(
+        source,
+        "표 4.2-2\nbroken table",
+        metrics,
+        candidate_metadata={"table_label_pages": {"표 4.2-2": 4}},
+        repair_targets=[
+            RepairTarget(
+                target_kind="table",
+                issue_type=TABLE_ISSUE_MISSING_HEADER,
+                route_name="recover_tables_from_pdf_image",
+                description="recover table",
+                table_label="표 4.2-2",
+                page_number=107,
+                source_name="judge_table_finding",
+            )
+        ],
+    )
+
+    assert len(tasks) == 1
+    assert tasks[0].table_label == "표 4.2-2"
+    assert tasks[0].page_number == 4
+
+
 def test_visual_repair_prioritizes_flattened_table_block_over_slot_only_issue(monkeypatch) -> None:
     source = DocumentSource(
         path=Path("sample.pdf"),
@@ -934,8 +1284,9 @@ def test_direct_visual_repair_uses_candidate_metadata_for_html_preference(monkey
     assert isinstance(captured["candidate_metadata"], dict)
     assert captured["candidate_metadata"]["table_format"] == "html"
     assert captured["candidate_metadata"]["table_regions"] == candidate.metadata["table_regions"]
-    assert "<table>" in repaired.content
-    assert "<tr><th>a</th></tr>" in repaired.content
+    assert "<table>" not in repaired.content
+    assert "| a |" in repaired.content
+    assert "| b |" in repaired.content
     assert any(action.issue_type == "table_visual_recovery" for action in actions)
     assert any("format=html" in action.description for action in actions)
 

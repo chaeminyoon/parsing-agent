@@ -30,7 +30,17 @@ class WorkflowConfig:
     )
     triage_enabled: bool = field(default_factory=lambda: _env_flag("PARSING_AGENT_TRIAGE_ENABLED", True))
     triage_sample_pages: int = field(default_factory=lambda: int(os.getenv("PARSING_AGENT_TRIAGE_SAMPLE_PAGES", "2")))
-    max_repair_rounds: int = 1
+    ocr_enabled: bool = field(default_factory=lambda: _env_flag("PARSING_AGENT_OCR_ENABLED", False))
+    ocr_provider: str = field(default_factory=lambda: os.getenv("PARSING_AGENT_OCR_PROVIDER", "surya"))
+    ocr_min_text_characters: int = field(
+        default_factory=lambda: int(os.getenv("PARSING_AGENT_OCR_MIN_TEXT_CHARACTERS", "50"))
+    )
+    ocr_timeout_seconds: int = field(
+        default_factory=lambda: int(os.getenv("PARSING_AGENT_OCR_TIMEOUT_SECONDS", "900"))
+    )
+    ocr_fail_open: bool = field(default_factory=lambda: _env_flag("PARSING_AGENT_OCR_FAIL_OPEN", True))
+    ocr_command: str = field(default_factory=lambda: os.getenv("PARSING_AGENT_OCR_COMMAND", "surya_ocr"))
+    max_repair_rounds: int = 3
     output_format: str = "md"
     weights: WorkflowWeights = field(default_factory=WorkflowWeights)
     judge_weight: float = 0.25
@@ -42,6 +52,12 @@ class WorkflowConfig:
     max_hallucination_risk: float | None = None
     judge_prompt_tuning_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_JUDGE_PROMPT_TUNING_ENABLED", True)
+    )
+    judge_prompt_version: str | None = field(
+        default_factory=lambda: os.getenv("PARSING_AGENT_JUDGE_PROMPT_VERSION")
+    )
+    judge_system_prompt: str | None = field(
+        default_factory=lambda: os.getenv("PARSING_AGENT_JUDGE_SYSTEM_PROMPT")
     )
     judge_feedback_log_path: str = field(
         default_factory=lambda: os.getenv("PARSING_AGENT_JUDGE_FEEDBACK_LOG_PATH", "judge_feedback.jsonl")
@@ -61,6 +77,18 @@ class WorkflowConfig:
     judge_base_url: str = field(default_factory=lambda: os.getenv("PARSING_AGENT_JUDGE_BASE_URL", "https://api.openai.com/v1"))
     judge_api_key: str | None = field(default_factory=lambda: os.getenv("OPENAI_API_KEY"))
     judge_timeout_seconds: float = 60.0
+    judge_max_source_characters: int = field(
+        default_factory=lambda: int(os.getenv("PARSING_AGENT_JUDGE_MAX_SOURCE_CHARACTERS", "12000"))
+    )
+    judge_max_candidate_characters: int = field(
+        default_factory=lambda: int(os.getenv("PARSING_AGENT_JUDGE_MAX_CANDIDATE_CHARACTERS", "12000"))
+    )
+    judge_evidence_segments: int = field(
+        default_factory=lambda: int(os.getenv("PARSING_AGENT_JUDGE_EVIDENCE_SEGMENTS", "4"))
+    )
+    judge_table_evidence_limit: int = field(
+        default_factory=lambda: int(os.getenv("PARSING_AGENT_JUDGE_TABLE_EVIDENCE_LIMIT", "3"))
+    )
     visual_table_recovery_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_VISUAL_TABLE_RECOVERY_ENABLED", True)
     )
@@ -130,3 +158,9 @@ class WorkflowConfig:
     langsmith_api_key: str | None = field(default_factory=lambda: os.getenv("LANGSMITH_API_KEY"))
     langsmith_endpoint: str | None = field(default_factory=lambda: os.getenv("LANGSMITH_ENDPOINT"))
     langsmith_workspace_id: str | None = field(default_factory=lambda: os.getenv("LANGSMITH_WORKSPACE_ID"))
+    langsmith_hide_inputs: bool = field(
+        default_factory=lambda: _env_flag("PARSING_AGENT_LANGSMITH_HIDE_INPUTS", True)
+    )
+    langsmith_hide_outputs: bool = field(
+        default_factory=lambda: _env_flag("PARSING_AGENT_LANGSMITH_HIDE_OUTPUTS", True)
+    )

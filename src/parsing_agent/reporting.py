@@ -19,6 +19,7 @@ def _build_judge_payload(judge_result: JudgeResult | None, llm_judge_score: floa
             "editorial_readiness": None,
             "notes": [],
             "issues": [],
+            "table_findings": [],
         }
     return {
         "overall_score": judge_result.overall_score,
@@ -29,6 +30,7 @@ def _build_judge_payload(judge_result: JudgeResult | None, llm_judge_score: floa
         "editorial_readiness": judge_result.editorial_readiness,
         "notes": judge_result.notes,
         "issues": judge_result.issues,
+        "table_findings": judge_result.table_findings,
     }
 
 
@@ -40,6 +42,8 @@ def build_report_payload(result: WorkflowResult) -> dict[str, object]:
             "media_type": result.source.media_type,
             "size_bytes": result.source.size_bytes,
             "page_count": result.source.page_count,
+            "ocr": result.source.ocr_metadata,
+            "ocr_artifacts": result.source.ocr_artifacts,
         },
         "best_candidate": {
             "parser_name": result.best_candidate.parser_name,
