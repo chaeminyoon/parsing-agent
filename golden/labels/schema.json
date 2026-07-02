@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "golden-label",
+  "description": "문서 하나에 대한 사람 라벨. 같은 문서를 여러 평가자가 라벨링하면 ratings 배열에 항목이 늘어난다.",
+  "type": "object",
+  "required": ["document", "ratings"],
+  "properties": {
+    "document": {
+      "type": "string",
+      "description": "data/ 아래 원본 PDF 파일명 (경로 제외)"
+    },
+    "pipeline_output": {
+      "type": "string",
+      "description": "라벨링에 사용한 파이프라인 출력 md의 상대 경로 (재현용)"
+    },
+    "ratings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "rater",
+          "labeled_at",
+          "overall_quality",
+          "text_coverage",
+          "table_correctness",
+          "structure_preservation",
+          "hallucination"
+        ],
+        "properties": {
+          "rater": { "type": "string", "description": "평가자 식별자 (예: cmyoon)" },
+          "labeled_at": { "type": "string", "format": "date" },
+          "overall_quality": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "text_coverage": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "table_correctness": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "structure_preservation": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "hallucination": { "type": "boolean" },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  }
+}

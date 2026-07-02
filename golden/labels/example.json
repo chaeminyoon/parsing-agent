@@ -1,0 +1,26 @@
+{
+  "document": "환경영향평가 협의내용[예시].pdf",
+  "pipeline_output": "outputs/golden-run/환경영향평가 협의내용[예시]/환경영향평가 협의내용[예시].md",
+  "ratings": [
+    {
+      "rater": "rater-a",
+      "labeled_at": "2026-07-02",
+      "overall_quality": 4,
+      "text_coverage": 5,
+      "table_correctness": 2,
+      "structure_preservation": 4,
+      "hallucination": false,
+      "notes": "본문·헤딩은 온전함. 6~7페이지 사후환경영향조사계획 표의 병합셀 구조가 깨져 값-항목 대응이 틀어짐."
+    },
+    {
+      "rater": "rater-b",
+      "labeled_at": "2026-07-02",
+      "overall_quality": 3,
+      "text_coverage": 5,
+      "table_correctness": 2,
+      "structure_preservation": 5,
+      "hallucination": false,
+      "notes": "표 문제로 RAG 인덱싱 전 수동 확인 필요하다고 판단."
+    }
+  ]
+}
