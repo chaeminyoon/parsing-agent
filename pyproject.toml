@@ -23,6 +23,9 @@ bench = [
     "markitdown[pdf]>=0.1.6",
     "pymupdf4llm>=1.27.2.3",
 ]
+bench-docling = [
+    "docling>=2.108.0",
+]
 
 [project.scripts]
 parsing-agent = "parsing_agent.cli:main"

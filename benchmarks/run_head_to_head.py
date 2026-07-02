@@ -9,16 +9,16 @@
 - opendataloader     : 이 파이프라인의 기본 파서 단발 출력 (베이스라인)
 - pymupdf4llm        : PyMuPDF 기반 마크다운 변환
 - markitdown         : Microsoft MarkItDown (pdfminer 기반)
+- docling            : IBM Docling (--extra bench-docling 필요, 첫 실행 시 모델 다운로드)
 - parsing-agent      : 풀 루프 (judge + 수리, OPENAI_API_KEY 필요)
 
-채점: 네 엔진 모두 **동일한 결정적 채점기**(judge 없음)로 잰다.
+채점: 모든 엔진을 **동일한 결정적 채점기**(judge 없음)로 잰다.
 주의 — parsing-agent는 이 채점기를 내부에서 직접 최적화하므로 구조적으로
 유리하다. 이 표는 "같은 잣대로 쟀을 때의 방향"이지 중립 벤치마크가 아니다.
 중립 검증은 golden/ 의 사람 라벨 상관 분석으로 한다.
 
-marker/docling 제외 사유: marker는 GPL-3.0(라이선스 비호환 우려),
-docling은 수 GB 모델 다운로드가 필요해 재현 비용이 크다. 공정한 확장은
-opendataloader-bench 같은 외부 하네스에 우리 출력을 넣는 방향이 맞다.
+marker 제외 사유: GPL-3.0 (라이선스 비호환 우려). 부분 실행은
+--engines 로 선택하며, 결과는 기존 results.json에 병합된다.
 """
 
 from __future__ import annotations
@@ -69,6 +69,13 @@ def run_markitdown(pdf: Path, workdir: Path) -> str:
     return MarkItDown(enable_plugins=False).convert(str(pdf)).text_content
 
 
+def run_docling(pdf: Path, workdir: Path) -> str:
+    del workdir
+    from docling.document_converter import DocumentConverter
+
+    return DocumentConverter().convert(str(pdf)).document.export_to_markdown()
+
+
 def run_parsing_agent(pdf: Path, workdir: Path) -> str:
     from parsing_agent.workflow import WorkflowRunner
 
@@ -81,6 +88,7 @@ ENGINES = {
     "opendataloader": run_opendataloader,
     "pymupdf4llm": run_pymupdf4llm,
     "markitdown": run_markitdown,
+    "docling": run_docling,
     "parsing-agent": run_parsing_agent,
 }
 
@@ -129,6 +137,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pdfs", nargs="+", type=Path)
     parser.add_argument("--no-agent", action="store_true", help="parsing-agent 풀 루프(API 호출) 생략")
+    parser.add_argument("--engines", nargs="*", choices=sorted(ENGINES), help="실행할 엔진 부분 선택")
     parser.add_argument("--output-dir", type=Path, default=Path("benchmarks/results"))
     args = parser.parse_args()
 
@@ -137,13 +146,20 @@ def main() -> int:
     workdir = args.output_dir / "work"
     workdir.mkdir(parents=True, exist_ok=True)
 
-    engines = dict(ENGINES)
-    if args.no_agent:
-        engines.pop("parsing-agent")
+    if args.engines:
+        engines = {name: ENGINES[name] for name in args.engines}
+    else:
+        engines = dict(ENGINES)
+        if args.no_agent:
+            engines.pop("parsing-agent")
 
+    # 부분 실행 결과가 기존 결과를 지우지 않도록 병합한다
+    results_path = args.output_dir / "results.json"
     results: dict[str, dict] = {}
+    if results_path.exists():
+        results = json.loads(results_path.read_text(encoding="utf-8"))
     for pdf in args.pdfs:
-        results[pdf.name] = {}
+        results.setdefault(pdf.name, {})
         for engine, runner in engines.items():
             started = time.monotonic()
             try:

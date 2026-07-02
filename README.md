@@ -10,7 +10,7 @@ safety: score-regression rollback, fail-open LLM judge, per-chunk exception isol
 requirements: Python 3.12+, uv; OPENAI_API_KEY optional (degrades to deterministic metrics)
 license: MIT
 cost-observability: per-stage LLM call counts, retries, latency, tokens in report monitoring.llm_usage
-benchmark: head-to-head vs opendataloader/pymupdf4llm/markitdown on 3 real Korean PDFs using this project's own deterministic scorer (bias disclosed; parsing-agent avg 0.732 vs 0.666/0.655/0.358; loses 1 of 3 docs to markitdown); neutral human-label validation pending (golden/ scaffold ready)
+benchmark: head-to-head vs opendataloader/pymupdf4llm/markitdown/docling on 3 real Korean PDFs using this project's own deterministic scorer (bias disclosed; parsing-agent avg 0.732, best per-doc winner varies across engines; parsing-agent wins on floor stability, not peaks); neutral human-label validation pending (golden/ scaffold + label stubs ready)
 key-differentiators: [self-verification with rollback, cost-aware repair routing with LLM escalation, structured node contracts (enums not prose), every rejection logged with a reason, 175 tests + graph-level E2E harness]
 -->
 
@@ -114,23 +114,26 @@ LangSmith 트레이스도 같은 원칙이라, route 노드를 열면 분기 근
 
 ### 외부 파서 head-to-head
 
-실제 환경영향평가 PDF 3종에 대해 네 엔진을 **동일한 결정적 채점기(judge 제외)**로 쟀다. 먼저 공지: **이 채점기는 우리 것이고 parsing-agent는 이걸 내부에서 직접 최적화하므로 구조적으로 유리하다.** 같은 잣대로 쟀을 때의 방향으로만 해석해야 하고, 중립 검증은 사람 라벨(골든셋)로 해야 한다. 재현: `uv sync --extra bench && uv run python benchmarks/run_head_to_head.py data/*.pdf`
+실제 환경영향평가 PDF 3종에 대해 다섯 엔진을 **동일한 결정적 채점기(judge 제외)**로 쟀다. 먼저 공지: **이 채점기는 우리 것이고 parsing-agent는 이걸 내부에서 직접 최적화하므로 구조적으로 유리하다.** 같은 잣대로 쟀을 때의 방향으로만 해석해야 하고, 중립 검증은 사람 라벨(골든셋)로 해야 한다. 재현: `uv sync --extra bench --extra bench-docling && uv run python benchmarks/run_head_to_head.py data/*.pdf`
 
 | 엔진 | 평균 total | 협의내용 | 사업개요 | 대상지역 설정 | 시간/문서 |
 |---|---|---|---|---|---|
-| **parsing-agent (풀 루프)** | **0.732** | **0.812** | 0.630 | **0.755** | 186~260s |
+| **parsing-agent (풀 루프)** | **0.732** | **0.812** | 0.630 | 0.755 | 186~260s |
 | markitdown | 0.666 | 0.785 | **0.680** | 0.531 | 0.1~1.4s |
+| docling | 0.657 | 0.783 | 0.426 | **0.761** | 5~19s* |
 | opendataloader (베이스라인 단발) | 0.655 | 0.744 | 0.583 | 0.638 | 1.1~5.3s |
 | pymupdf4llm | 0.358 | 0.405 | 0.000 | 0.669 | 0.7~16.5s |
 
+<sub>* docling 첫 실행은 모델 다운로드 포함 77s. marker는 GPL-3.0이라 제외.</sub>
+
 정직하게 읽으면:
 
-- 3문서 중 2개에서 parsing-agent가 1위였고, **사업개요 문서에서는 markitdown 단발 출력에 졌다** (0.630 vs 0.680). 수리 루프가 항상 이기는 게 아니다 — 그 문서는 구조 자체가 복잡해서 베이스라인 파서의 한계를 루프가 다 메우지 못했다
-- 베이스라인(opendataloader 단발) 대비로는 3문서 모두 개선했다 (+0.068 / +0.047 / +0.117). 루프가 파는 건 "무조건 최고 점수"가 아니라 **어떤 파서 위에서든 그 파서보다 나아지고, 왜/어디가 안 나아졌는지 설명 가능하다**는 것이다
-- 비용이 크다: 단발 파서들이 수 초일 때 풀 루프는 문서당 3~4분 + LLM 호출 (내역은 리포트 `llm_usage`에 남는다)
-- pymupdf4llm은 이 한국어 문서들에서 본문 추출 자체가 무너졌다 (커버리지 0.10~0.63)
+- **문서별 1위가 셋 다 다르다** — 협의내용은 parsing-agent, 사업개요는 markitdown, 대상지역 설정은 docling(0.761 vs 우리 0.755, 근소). 단발 파서 중 어느 것도 전 문서에서 안정적이지 않고, 우리도 사업개요에서 markitdown에 졌다 (0.630 vs 0.680)
+- parsing-agent가 **평균 1위인 이유는 최고점이 아니라 최저점이 높아서다** — 문서별 최저점이 0.630으로, 다른 엔진들(0.405 / 0.426 / 0.531 / 0.000)처럼 특정 문서에서 무너지지 않는다. 수리 루프가 파는 건 화려한 1위가 아니라 바닥을 끌어올리는 안정성이다
+- 베이스라인(opendataloader 단발) 대비로는 3문서 모두 개선했다 (+0.068 / +0.047 / +0.117). 어떤 파서 위에서든 그 파서보다 나아지고, 안 나아진 지점은 거부 사유로 설명된다
+- 비용이 크다: 단발 파서들이 수 초~수십 초일 때 풀 루프는 문서당 3~4분 + LLM 호출 (내역은 리포트 `llm_usage`에 남는다)
 
-marker와 docling은 제외했다 — marker는 GPL-3.0이고 docling은 수 GB 모델 다운로드가 필요해 재현 비용이 크다. 이 도구들과의 공정한 비교는 자체 채점기가 아니라 사람 라벨 골든셋이 생긴 뒤에 의미가 있다. 참고로 이 파이프라인은 저런 파서들을 어댑터로 안에 품는 구조라, 경쟁 관계라기보다 그 위에 얹는 품질 루프다.
+사람 라벨 골든셋이 모이면 같은 표를 중립 채점(사람 기준 상관)으로 재계산한다 — `golden/`에 라벨링 프로토콜과 분석 스크립트가 준비돼 있다. 참고로 이 파이프라인은 저런 파서들을 어댑터로 안에 품는 구조라, 경쟁 관계라기보다 그 위에 얹는 품질 루프다.
 
 ## 신뢰성
 
@@ -156,9 +159,9 @@ Python 3.12 · LangGraph · LangSmith · OpenAI 호환 API (텍스트/비전) ·
 
 ## 로드맵
 
-- [x] 외부 파서 head-to-head (자체 채점기 기준, 편향 공지 포함 — `benchmarks/`)
-- [x] 골든셋 스캐폴드 — 라벨링 가이드·스키마·상관 분석 스크립트 (`golden/`)
-- [ ] 골든셋 라벨 수집 (1차 20건) — 자체 점수와 사람 기준의 상관 검증. 제일 큰 빚
-- [ ] TEDS 계열 셀 단위 표 구조 메트릭 (현재는 열 개수 일관성 수준)
-- [ ] 골든셋 기반 중립 채점으로 head-to-head 재실행 (docling 포함)
-- [ ] 다중 페이지 병합셀 표의 비전 crop 전략 개선
+- [x] 외부 파서 head-to-head — docling 포함 5개 엔진, 자체 채점기 기준·편향 공지 (`benchmarks/`)
+- [x] 골든셋 스캐폴드 — 라벨링 가이드·스키마·상관 분석 스크립트·문서별 스텁 (`golden/`)
+- [x] TEDS-lite 셀 단위 표 메트릭 — PDF 괘선 표 그리드 기준, 진단용 `table_cell_similarity`
+- [x] 다중 페이지 표 crop — 이어지는 페이지 이미지 동봉, label-window 고정 높이 제거
+- [ ] 골든셋 라벨 수집 — 사람 평가자 2인이 `golden/labels/` 스텁을 채워야 한다 (로컬 6건 + 추가 문서 14건). 제일 큰 빚
+- [ ] 라벨 확보 후: judge 캘리브레이션, `table_cell_similarity`의 total_score 반영 여부 결정, head-to-head 중립 채점 재계산
