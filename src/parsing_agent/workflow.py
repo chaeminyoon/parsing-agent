@@ -127,6 +127,86 @@ def _summarize_ocr_metadata(metadata: dict[str, object] | None) -> dict[str, obj
     return {key: value for key, value in metadata.items() if key in allowed_keys}
 
 
+_TRACE_COLLECTION_ITEM_LIMIT = 20
+
+
+def _summarize_trace_collection(value) -> dict[str, object]:
+    """분기 판단에 쓰이는 컬렉션을 문장 없이 구조화된 필드로 요약한다.
+
+    description/notes 같은 자유 문장은 제외하고, 라우팅이 실제로 참조하는
+    enum(issue_type, route_name, strategy)과 수치(confidence, score_delta)만
+    트레이스에 내보낸다.
+    """
+    items = list(value)[:_TRACE_COLLECTION_ITEM_LIMIT]
+    if items and all(isinstance(item, RepairTarget) for item in items):
+        return {
+            "type": "repair_targets",
+            "count": len(value),
+            "items": [
+                {
+                    "issue_type": target.issue_type,
+                    "route_name": target.route_name,
+                    "severity": target.severity,
+                    "confidence": target.confidence,
+                    "table_label": target.table_label,
+                    "page_number": target.page_number,
+                    "repairability": target.repairability,
+                    "expected_gain": target.expected_gain,
+                    "risk_level": target.risk_level,
+                }
+                for target in items
+            ],
+        }
+    if items and all(isinstance(item, RepairPlanStep) for item in items):
+        return {
+            "type": "repair_plan",
+            "count": len(value),
+            "items": [
+                {
+                    "strategy": step.strategy,
+                    "route_name": step.route_name,
+                    "priority": step.priority,
+                    "expected_gain": step.expected_gain,
+                    "estimated_cost": step.estimated_cost,
+                    "risk_level": step.risk_level,
+                    "skip_reason": step.skip_reason,
+                    "issue_types": sorted({target.issue_type for target in step.targets}),
+                }
+                for step in items
+            ],
+        }
+    if items and all(isinstance(item, RepairAction) for item in items):
+        return {
+            "type": "repair_actions",
+            "count": len(value),
+            "items": [
+                {
+                    "action_name": action.action_name,
+                    "issue_type": action.issue_type,
+                    "route_name": action.route_name,
+                }
+                for action in items
+            ],
+        }
+    if items and all(isinstance(item, RepairOutcome) for item in items):
+        return {
+            "type": "repair_outcomes",
+            "count": len(value),
+            "items": [
+                {
+                    "action_name": outcome.action_name,
+                    "issue_type": outcome.issue_type,
+                    "route_name": outcome.route_name,
+                    "score_delta": outcome.score_delta,
+                    "verification_passed": outcome.verification_passed,
+                    "failure_reason": outcome.failure_reason,
+                }
+                for outcome in items
+            ],
+        }
+    return {"type": "collection", "count": len(value)}
+
+
 def _summarize_langsmith_payload(payload: dict) -> dict[str, object]:
     """Replace graph state with a trace-safe operational summary."""
     fields: dict[str, object] = {}
@@ -164,7 +244,11 @@ def _summarize_langsmith_payload(payload: dict) -> dict[str, object]:
                 "structure_retention": value.structure_retention,
                 "table_preservation": value.table_preservation,
                 "llm_judge_score": value.llm_judge_score,
-                "table_issue_count": len(value.table_issues),
+                "table_issues": list(value.table_issues),
+                "issue_types": sorted({issue.issue_type for issue in value.issues}),
+                "judge_table_finding_count": 0
+                if value.judge_result is None
+                else len(value.judge_result.table_findings),
             }
             continue
         if isinstance(value, WorkflowResult):
@@ -187,7 +271,7 @@ def _summarize_langsmith_payload(payload: dict) -> dict[str, object]:
             }
             continue
         if isinstance(value, (list, tuple, set)):
-            fields[str(key)] = {"type": "collection", "count": len(value)}
+            fields[str(key)] = _summarize_trace_collection(value)
             continue
         if isinstance(value, str):
             fields[str(key)] = {"type": "text", "character_count": len(value)}

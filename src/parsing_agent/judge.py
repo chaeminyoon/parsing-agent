@@ -40,7 +40,8 @@ Return strict JSON with this schema:
 `issues` may be omitted or an empty list.
 `table_findings` may be omitted or an empty list.
 `overall_score` should reflect content fidelity, structural preservation, formatting usefulness, and penalize hallucination risk.
-If the document contains table cues or table structure damage, you must use `table_findings` instead of leaving all table problems in free-form `issues`.
+`issues` and `notes` are human-readable commentary ONLY and are never machine-parsed.
+Any problem that should trigger a repair MUST appear in `table_findings` with an exact taxonomy `issue_type` value; a problem mentioned only in `issues` will not be acted on.
 Use `page_number` as the grounded PDF page number you actually inspected, not a printed page label from the document body.
 Do not include any prose outside the JSON object."""
 _TABLE_LABEL_RE = re.compile(r"(?:table|\uD45C)\s*(?:<\s*)?(\d+(?:\.\d+)*(?:-\d+)?)", re.IGNORECASE)

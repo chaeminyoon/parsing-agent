@@ -331,17 +331,26 @@ def classify_table_issues(source: DocumentSource, candidate: ParseCandidate, jud
         detected.append(issue_type)
 
     if judge_result is not None:
+        has_structured_findings = any(
+            isinstance(finding.get("issue_type"), str)
+            and finding.get("issue_type") in TABLE_ISSUE_TAXONOMY
+            for finding in judge_result.table_findings
+        )
         for finding in judge_result.table_findings:
             issue_type = finding.get("issue_type")
             if isinstance(issue_type, str) and issue_type in TABLE_ISSUE_TAXONOMY:
                 if issue_type == TABLE_ISSUE_TEXT_DUPLICATION and not _has_repeated_table_block(candidate.content):
                     continue
                 add(issue_type)
-        for issue in judge_result.issues:
-            for issue_type in extract_table_issue_types(issue):
-                if issue_type == TABLE_ISSUE_TEXT_DUPLICATION and not _has_repeated_table_block(candidate.content):
-                    continue
-                add(issue_type)
+        # 구조화된 findings가 있으면 그 채널만 신뢰한다. 자유 문장 정규식
+        # 파싱("중복", "계속" 등 광범위 패턴)은 judge가 구조화 응답을
+        # 주지 못한 경우의 레거시 폴백으로만 쓴다.
+        if not has_structured_findings:
+            for issue in judge_result.issues:
+                for issue_type in extract_table_issue_types(issue):
+                    if issue_type == TABLE_ISSUE_TEXT_DUPLICATION and not _has_repeated_table_block(candidate.content):
+                        continue
+                    add(issue_type)
 
     for table_region in _candidate_table_regions(candidate):
         if table_region.get("continued_from_page") is not None:
