@@ -94,6 +94,10 @@ class WorkflowState(TypedDict, total=False):
     repair_outcomes: list[RepairOutcome]
     diagnosed_issues_history: list[dict[str, object]]
     failed_visual_task_keys: list[str]
+    parse_errors: list[dict[str, str]]
+    best_candidate: ParseCandidate
+    best_metrics: EvaluationMetrics
+    rollback_events: list[dict[str, object]]
     result: WorkflowResult
 
 
@@ -297,8 +301,24 @@ class WorkflowRunner:
     def _parse_document_node(self, state: WorkflowState) -> WorkflowState:
         source = self._materialize_source_text(state["source"])
         base_parser_name = self._base_parser_name_for_source(source)
-        parsed_candidates = self._run_parsers(source, [base_parser_name])
-        candidate = self._select_base_candidate(source, parsed_candidates)
+        parse_errors: list[dict[str, str]] = []
+        candidate: ParseCandidate | None = None
+        for parser_name in self._parser_fallback_chain(base_parser_name):
+            try:
+                parsed_candidates = self._run_parsers(source, [parser_name])
+            except Exception as exc:  # noqa: BLE001 - 개별 파서 실패는 다음 파서로 폴백한다
+                parse_errors.append(
+                    {"parser": parser_name, "error": f"{type(exc).__name__}: {exc}"}
+                )
+                continue
+            if not parsed_candidates:
+                parse_errors.append({"parser": parser_name, "error": "no_candidates_produced"})
+                continue
+            candidate = self._select_base_candidate(source, parsed_candidates)
+            break
+        if candidate is None:
+            error_summary = "; ".join(f"{item['parser']}: {item['error']}" for item in parse_errors)
+            raise ValueError(f"All parsers failed for {source.path} ({error_summary})")
         if self._config.langsmith_tracing:
             candidate = self._externalize_candidate_content(candidate)
         return {
@@ -310,7 +330,15 @@ class WorkflowRunner:
             "repair_outcomes": [],
             "diagnosed_issues_history": [],
             "failed_visual_task_keys": [],
+            "parse_errors": parse_errors,
         }
+
+    def _parser_fallback_chain(self, base_parser_name: str) -> list[str]:
+        chain = [base_parser_name]
+        for name in [*self._config.parser_names, "text-fallback", "source-text"]:
+            if name not in chain and self._parser_registry.has(name):
+                chain.append(name)
+        return chain
 
     def _evaluate_candidate_node(self, state: WorkflowState) -> WorkflowState:
         source = self._materialize_source_text(state["source"])
@@ -332,11 +360,33 @@ class WorkflowRunner:
             outcomes=list(state.get("repair_outcomes") or []),
             metrics=metrics,
         )
-        return {
+        updates: WorkflowState = {
             "metrics": metrics,
             "accuracy_snapshots": snapshots,
             "repair_outcomes": repair_outcomes,
         }
+        best_metrics = state.get("best_metrics")
+        best_candidate = state.get("best_candidate")
+        if best_metrics is None or best_candidate is None or metrics.total_score >= best_metrics.total_score:
+            updates["best_candidate"] = state["candidate"]
+            updates["best_metrics"] = metrics
+        else:
+            # 수리가 점수를 악화시킨 경우: 최고 성적 후보로 되돌려 다음
+            # 라운드와 finalize가 악화된 결과 위에서 진행되지 않게 한다.
+            rollback_events = list(state.get("rollback_events") or [])
+            rollback_events.append(
+                {
+                    "iteration": int(state.get("iteration_count", 0)),
+                    "stage": stage,
+                    "regressed_score": float(metrics.total_score),
+                    "restored_score": float(best_metrics.total_score),
+                }
+            )
+            snapshots[-1] = {**snapshots[-1], "rolled_back": True}
+            updates["candidate"] = best_candidate
+            updates["metrics"] = best_metrics
+            updates["rollback_events"] = rollback_events
+        return updates
 
     def _route_after_evaluation(self, state: WorkflowState) -> str:
         metrics = state.get("metrics")
@@ -578,7 +628,10 @@ class WorkflowRunner:
                 ]
             }
         task = state["task"]
-        result = self._repairer.apply_chunk_repair(state["source"], state["candidate"], task)
+        try:
+            result = self._repairer.apply_chunk_repair(state["source"], state["candidate"], task)
+        except Exception:  # noqa: BLE001 - 청크 하나의 실패가 나머지 수리를 막으면 안 된다
+            result = None
         if result is None:
             return {"repair_task_results": [RepairChunkResult(task_id=task.task_id)]}
         candidate, action = result
@@ -692,6 +745,8 @@ class WorkflowRunner:
                         "paths": [],
                     },
                     "failed_visual_task_keys": list(state.get("failed_visual_task_keys") or []),
+                    "parse_errors": list(state.get("parse_errors") or []),
+                    "rollback_events": list(state.get("rollback_events") or []),
                 },
                 "diagnosed_issues": list(state.get("diagnosed_issues_history") or []),
                 "repair_plan": list(state.get("repair_plan_history") or []),
@@ -759,7 +814,14 @@ class WorkflowRunner:
         priority = self._repair_strategy_priority(strategy, iteration_count, score_delta)
         confidence = max((target.confidence for target in targets), default=0.0)
         effective_skip_reason = skip_reason
-        if effective_skip_reason is None and estimated_cost > 0 and expected_gain < 0.03:
+        # 비용 게이트는 재수리 라운드에만 적용한다. 첫 라운드는 PRD의
+        # inspect → route → repair 강제 경로를 보장해야 하므로 스킵하지 않는다.
+        if (
+            effective_skip_reason is None
+            and iteration_count >= 1
+            and estimated_cost > 0
+            and expected_gain < 0.03
+        ):
             effective_skip_reason = "expected_gain_below_cost_gate"
         if effective_skip_reason is None and risk_level == "high" and confidence < 0.4:
             effective_skip_reason = "low_confidence_high_risk_repair"

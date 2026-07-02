@@ -77,6 +77,12 @@ class WorkflowConfig:
     judge_base_url: str = field(default_factory=lambda: os.getenv("PARSING_AGENT_JUDGE_BASE_URL", "https://api.openai.com/v1"))
     judge_api_key: str | None = field(default_factory=lambda: os.getenv("OPENAI_API_KEY"))
     judge_timeout_seconds: float = 60.0
+    judge_max_retries: int = field(
+        default_factory=lambda: int(os.getenv("PARSING_AGENT_JUDGE_MAX_RETRIES", "2"))
+    )
+    judge_fail_open: bool = field(
+        default_factory=lambda: _env_flag("PARSING_AGENT_JUDGE_FAIL_OPEN", True)
+    )
     judge_max_source_characters: int = field(
         default_factory=lambda: int(os.getenv("PARSING_AGENT_JUDGE_MAX_SOURCE_CHARACTERS", "12000"))
     )

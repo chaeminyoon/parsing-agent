@@ -3,7 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import re
+import socket
+import time
 from typing import Any
+from urllib import error as urllib_error
 from urllib import request
 
 import fitz
@@ -105,6 +108,73 @@ def _post_response(
             return json.loads(response.read().decode("utf-8"))
 
 
+class JudgeUnavailableError(RuntimeError):
+    """LLM judge 호출이 재시도 후에도 실패했을 때 발생한다."""
+
+
+_RETRYABLE_HTTP_STATUSES = {408, 409, 429, 500, 502, 503, 504}
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    if isinstance(exc, urllib_error.HTTPError):
+        return exc.code in _RETRYABLE_HTTP_STATUSES
+    return isinstance(exc, (urllib_error.URLError, TimeoutError, socket.timeout, ConnectionError))
+
+
+def _call_with_retry(post_fn, *, max_retries: int, backoff_seconds: float = 1.0, **kwargs) -> dict[str, Any]:
+    """LLM HTTP 호출을 일시 오류에 한해 지수 백오프로 재시도한다.
+
+    비-일시 오류(4xx 등)와 재시도 소진은 JudgeUnavailableError로 감싸
+    호출자가 judge 실패를 한 가지 타입으로 처리할 수 있게 한다.
+    """
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return post_fn(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - 모든 실패를 JudgeUnavailableError로 정규화
+            last_error = exc
+            if attempt >= max_retries or not _is_retryable_error(exc):
+                break
+            time.sleep(backoff_seconds * (2**attempt))
+    raise JudgeUnavailableError(
+        f"LLM judge request failed after {max_retries + 1} attempt(s): {type(last_error).__name__}: {last_error}"
+    ) from last_error
+
+
+def _parse_judge_verdict(raw_text: str) -> dict[str, Any]:
+    """judge 응답 텍스트에서 JSON verdict를 최대한 복원한다.
+
+    strict JSON을 우선 시도하고, 실패하면 코드펜스 내부 → 첫 번째
+    중괄호 블록 순서로 폴백한다. 전부 실패하면 ValueError.
+    """
+    text = raw_text.strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    fence_match = _JSON_FENCE_RE.search(text)
+    if fence_match:
+        try:
+            parsed = json.loads(fence_match.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    brace_start = text.find("{")
+    brace_end = text.rfind("}")
+    if 0 <= brace_start < brace_end:
+        try:
+            parsed = json.loads(text[brace_start : brace_end + 1])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    raise ValueError("LLM judge response did not contain a parseable JSON object.")
+
+
 def _extract_response_text(response_payload: dict[str, Any]) -> str:
     output_items = response_payload.get("output") or []
     text_parts: list[str] = []
@@ -129,7 +199,10 @@ def _coerce_optional_score(payload: dict[str, Any], field_name: str) -> float | 
     value = payload.get(field_name)
     if value is None:
         return None
-    return _clamp(float(value))
+    try:
+        return _clamp(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _coerce_string_list(value: Any) -> list[str]:
@@ -264,11 +337,13 @@ class OpenAICompatibleJudge(CandidateJudge):
         max_candidate_characters: int = 12_000,
         evidence_segments: int = 4,
         table_evidence_limit: int = 3,
+        max_retries: int = 2,
     ) -> None:
         self._model = model
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
+        self._max_retries = max(0, max_retries)
         self._enable_multimodal_grounding = enable_multimodal_grounding
         self._grounding_max_pages = grounding_max_pages
         self._prompt_hints = list(prompt_hints or [])
@@ -301,7 +376,9 @@ class OpenAICompatibleJudge(CandidateJudge):
         )
         grounding_pages = _render_pdf_page_data_urls(source, self._grounding_max_pages) if self._enable_multimodal_grounding else []
         if grounding_pages:
-            response_payload = _post_response(
+            response_payload = _call_with_retry(
+                _post_response,
+                max_retries=self._max_retries,
                 url=f"{self._base_url}/responses",
                 api_key=self._api_key,
                 payload={
@@ -323,9 +400,11 @@ class OpenAICompatibleJudge(CandidateJudge):
                 },
                 timeout_seconds=self._timeout_seconds,
             )
-            verdict = json.loads(_extract_response_text(response_payload))
+            verdict = _parse_judge_verdict(_extract_response_text(response_payload))
         else:
-            response_payload = _post_chat_completion(
+            response_payload = _call_with_retry(
+                _post_chat_completion,
+                max_retries=self._max_retries,
                 url=f"{self._base_url}/chat/completions",
                 api_key=self._api_key,
                 payload={
@@ -339,10 +418,12 @@ class OpenAICompatibleJudge(CandidateJudge):
                 },
                 timeout_seconds=self._timeout_seconds,
             )
-            verdict = json.loads(_extract_message_content(response_payload))
+            verdict = _parse_judge_verdict(_extract_message_content(response_payload))
         overall_score = _coerce_optional_score(verdict, "overall_score")
         if overall_score is None:
-            overall_score = _clamp(float(verdict["score"]))
+            overall_score = _coerce_optional_score(verdict, "score")
+        if overall_score is None:
+            raise ValueError("LLM judge verdict did not include a usable overall_score.")
         return JudgeResult(
             overall_score=overall_score,
             coverage_score=_coerce_optional_score(verdict, "coverage_score"),
@@ -410,6 +491,7 @@ def build_default_judge(config: WorkflowConfig) -> CandidateJudge | None:
         max_candidate_characters=config.judge_max_candidate_characters,
         evidence_segments=config.judge_evidence_segments,
         table_evidence_limit=config.judge_table_evidence_limit,
+        max_retries=config.judge_max_retries,
     )
 
 

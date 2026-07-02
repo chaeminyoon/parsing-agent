@@ -682,7 +682,7 @@ def test_route_repair_strategy_preserves_structured_visual_target_payload() -> N
     assert result["repair_plan_history"][0]["steps"][0]["targets"][0]["table_label"] == "표 4.2-2"
 
 
-def test_route_repair_strategy_records_skipped_low_value_visual_repairs() -> None:
+def test_route_repair_strategy_plans_low_value_visual_repairs_on_first_round() -> None:
     runner = WorkflowRunner(config=WorkflowConfig(judge_weight=0, langsmith_tracing=False))
 
     result = runner._route_repair_strategy_node(
@@ -698,6 +698,30 @@ def test_route_repair_strategy_records_skipped_low_value_visual_repairs() -> Non
                     risk_level="medium",
                 ),
             ]
+        }
+    )
+
+    assert len(result["repair_plan"]) == 1
+    assert result["repair_plan"][0].skip_reason is None
+
+
+def test_route_repair_strategy_records_skipped_low_value_visual_repairs_after_first_round() -> None:
+    runner = WorkflowRunner(config=WorkflowConfig(judge_weight=0, langsmith_tracing=False))
+
+    result = runner._route_repair_strategy_node(
+        {
+            "iteration_count": 1,
+            "repair_targets": [
+                RepairTarget(
+                    target_kind="table",
+                    issue_type=TABLE_ISSUE_MISSING_HEADER,
+                    route_name="recover_tables_from_pdf_image",
+                    description="recover table",
+                    expected_gain=0.01,
+                    estimated_cost=1.0,
+                    risk_level="medium",
+                ),
+            ],
         }
     )
 

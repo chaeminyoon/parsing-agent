@@ -943,8 +943,17 @@ class DeterministicEvaluator(CandidateEvaluator):
                 metrics=metrics,
             )
         )
+        judge_result: JudgeResult | None = None
         if self._judge is not None:
-            judge_result = _coerce_judge_result(self._judge.judge(source, candidate, metrics))
+            try:
+                judge_result = _coerce_judge_result(self._judge.judge(source, candidate, metrics))
+            except Exception as exc:  # noqa: BLE001 - judge는 보조 신호라 실패해도 평가는 계속돼야 한다
+                if not getattr(self._config, "judge_fail_open", True):
+                    raise
+                metrics.notes.append(
+                    f"Judge unavailable, falling back to deterministic metrics only: {type(exc).__name__}: {exc}"
+                )
+        if judge_result is not None:
             metrics.judge_result = judge_result
             metrics.llm_judge_score = judge_result.overall_score
             metrics.table_issues = classify_table_issues(source, candidate, judge_result)
