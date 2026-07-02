@@ -798,7 +798,10 @@ def test_route_prioritizes_visual_repair_after_stalled_snapshot_delta() -> None:
 
 
 def test_route_skips_repeated_heuristic_after_stalled_snapshot_delta() -> None:
-    runner = WorkflowRunner(config=WorkflowConfig(judge_weight=0, langsmith_tracing=False))
+    # LLM 승격이 불가능한 구성에서는 정체된 heuristic 재시도를 스킵해야 한다.
+    runner = WorkflowRunner(
+        config=WorkflowConfig(judge_weight=0, langsmith_tracing=False, llm_text_repair_enabled=False)
+    )
 
     result = runner._route_repair_strategy_node(
         {

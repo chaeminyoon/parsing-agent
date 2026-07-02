@@ -106,6 +106,25 @@ class WorkflowConfig:
     visual_table_recovery_max_tables: int = field(
         default_factory=lambda: int(os.getenv("PARSING_AGENT_VISUAL_TABLE_RECOVERY_MAX_TABLES", "1"))
     )
+    llm_text_repair_enabled: bool = field(
+        default_factory=lambda: _env_flag("PARSING_AGENT_LLM_TEXT_REPAIR_ENABLED", True)
+    )
+    llm_text_repair_model: str | None = field(
+        default_factory=lambda: os.getenv("PARSING_AGENT_LLM_TEXT_REPAIR_MODEL")
+        or os.getenv("PARSING_AGENT_JUDGE_MODEL", "gpt-4.1-mini")
+    )
+    llm_text_repair_timeout_seconds: float = field(
+        default_factory=lambda: float(os.getenv("PARSING_AGENT_LLM_TEXT_REPAIR_TIMEOUT_SECONDS", "60"))
+    )
+    llm_text_repair_max_targets: int = field(
+        default_factory=lambda: int(os.getenv("PARSING_AGENT_LLM_TEXT_REPAIR_MAX_TARGETS", "3"))
+    )
+    llm_text_repair_min_confidence: float = field(
+        default_factory=lambda: float(os.getenv("PARSING_AGENT_LLM_TEXT_REPAIR_MIN_CONFIDENCE", "0.6"))
+    )
+    llm_text_repair_window_lines: int = field(
+        default_factory=lambda: int(os.getenv("PARSING_AGENT_LLM_TEXT_REPAIR_WINDOW_LINES", "60"))
+    )
     repair_fanout_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_REPAIR_FANOUT_ENABLED", True)
     )

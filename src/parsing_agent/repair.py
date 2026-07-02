@@ -1038,8 +1038,52 @@ def identify_repair_targets(
 
 
 class HeuristicRepairer(CandidateRepairer):
-    def __init__(self, *, visual_table_recoverer=None) -> None:
+    def __init__(self, *, visual_table_recoverer=None, text_repairer=None) -> None:
         self._visual_table_recoverer = visual_table_recoverer
+        self._text_repairer = text_repairer
+
+    def repair_llm_targets(
+        self,
+        source: DocumentSource,
+        candidate: ParseCandidate,
+        metrics: EvaluationMetrics,
+        targets: list[RepairTarget],
+        max_targets: int = 3,
+    ) -> tuple[ParseCandidate, list[RepairAction]]:
+        """이슈 단위 LLM 텍스트 수리를 최대 `max_targets`개까지 적용한다.
+
+        text repairer가 없거나 모든 이슈가 스킵되면 candidate를 그대로
+        돌려준다. 개별 이슈 실패는 다음 이슈로 넘어간다.
+        """
+        del metrics
+        if self._text_repairer is None or not targets:
+            return candidate, []
+        content = candidate.content
+        actions: list[RepairAction] = []
+        for target in targets[: max(0, max_targets)]:
+            try:
+                outcome = self._text_repairer.repair_target(source, content, target)
+            except Exception:  # noqa: BLE001 - 이슈 하나의 실패가 나머지를 막으면 안 된다
+                continue
+            if outcome is None:
+                continue
+            content = outcome.content
+            actions.append(outcome.action)
+        if not actions:
+            return candidate, []
+        repaired = replace(
+            candidate,
+            content=content,
+            repaired_from=candidate.repaired_from or candidate.parser_name,
+            metadata={
+                **candidate.metadata,
+                "repair_actions": [
+                    *candidate.metadata.get("repair_actions", []),
+                    *[action.action_name for action in actions],
+                ],
+            },
+        )
+        return repaired, actions
 
     def repair_heuristics(
         self,

@@ -14,6 +14,7 @@ from parsing_agent.evaluation import DeterministicEvaluator
 from parsing_agent.ingestion import build_document_source
 from parsing_agent.judge import build_default_judge
 from parsing_agent.interfaces import CandidateEvaluator, CandidateRepairer
+from parsing_agent.llm_repair import build_default_targeted_text_repairer
 from parsing_agent.monitoring import append_judge_feedback_record
 from parsing_agent.models import (
     DocumentSource,
@@ -209,7 +210,8 @@ class WorkflowRunner:
         self._validate_configured_parsers()
         self._evaluator = evaluator or DeterministicEvaluator(self._config, judge=build_default_judge(self._config))
         self._repairer = repairer or HeuristicRepairer(
-            visual_table_recoverer=build_default_visual_table_recoverer(self._config)
+            visual_table_recoverer=build_default_visual_table_recoverer(self._config),
+            text_repairer=build_default_targeted_text_repairer(self._config),
         )
         self._source_text_cache: dict[str, str] = {}
         self._candidate_content_cache: dict[str, str] = {}
@@ -426,13 +428,16 @@ class WorkflowRunner:
             for action in state.get("repairs") or []
             if isinstance(action, RepairAction) and action.route_name
         }
+        stalled = iteration_count >= 1 and score_delta is not None and score_delta < 0.01
         skipped_steps: list[RepairPlanStep] = []
         filtered_targets: list[RepairTarget] = []
         for target in repair_targets:
             if self._should_skip_repair_target(target, iteration_count, score_delta, attempted_routes):
                 skipped_steps.append(
                     self._build_repair_plan_step(
-                        strategy=self._repair_strategy_for_target(target),
+                        strategy=self._repair_strategy_for_target(
+                            target, stalled=stalled, attempted_routes=attempted_routes
+                        ),
                         route_name=target.route_name,
                         targets=[target],
                         iteration_count=iteration_count,
@@ -444,7 +449,9 @@ class WorkflowRunner:
             filtered_targets.append(target)
         grouped_targets: dict[tuple[str, str], list[RepairTarget]] = {}
         for target in filtered_targets:
-            strategy = self._repair_strategy_for_target(target)
+            strategy = self._repair_strategy_for_target(
+                target, stalled=stalled, attempted_routes=attempted_routes
+            )
             grouped_targets.setdefault((strategy, target.route_name), []).append(target)
         plan: list[RepairPlanStep] = []
         for strategy, route_name in sorted(
@@ -497,6 +504,16 @@ class WorkflowRunner:
         for step in repair_plan:
             if step.strategy == "visual_table_repair":
                 visual_targets.extend(step.targets)
+                continue
+            if step.strategy == "llm_text_repair" and isinstance(self._repairer, HeuristicRepairer):
+                repaired_candidate, llm_actions = self._repairer.repair_llm_targets(
+                    source,
+                    repaired_candidate,
+                    metrics,
+                    list(step.targets),
+                    max_targets=self._config.llm_text_repair_max_targets,
+                )
+                actions.extend(llm_actions)
                 continue
             step_targets = list(step.targets)
             if isinstance(self._repairer, HeuristicRepairer):
@@ -792,20 +809,18 @@ class WorkflowRunner:
         score_delta: float | None,
         skip_reason: str | None = None,
     ) -> RepairPlanStep:
+        gain_fallback = {"visual_table_repair": 0.08, "llm_text_repair": 0.05}.get(strategy, 0.03)
+        cost_fallback = {"visual_table_repair": 1.0, "llm_text_repair": 0.5}.get(strategy, 0.0)
         expected_gain = round(
             sum(
-                target.expected_gain
-                if target.expected_gain > 0
-                else (0.08 if strategy == "visual_table_repair" else 0.03)
+                target.expected_gain if target.expected_gain > 0 else gain_fallback
                 for target in targets
             ),
             4,
         )
         estimated_cost = round(
             sum(
-                target.estimated_cost
-                if target.estimated_cost > 0
-                else (1.0 if strategy == "visual_table_repair" else 0.0)
+                target.estimated_cost if target.estimated_cost > 0 else cost_fallback
                 for target in targets
             ),
             4,
@@ -1114,9 +1129,32 @@ class WorkflowRunner:
             return source
         return replace(source, extracted_text=extracted_text)
 
-    def _repair_strategy_for_target(self, target: RepairTarget) -> str:
+    def _llm_text_repair_available(self) -> bool:
+        return (
+            self._config.llm_text_repair_enabled
+            and isinstance(self._repairer, HeuristicRepairer)
+            and getattr(self._repairer, "_text_repairer", None) is not None
+        )
+
+    def _repair_strategy_for_target(
+        self,
+        target: RepairTarget,
+        *,
+        stalled: bool = False,
+        attempted_routes: set[str] | frozenset[str] = frozenset(),
+    ) -> str:
         if target.route_name == "recover_tables_from_pdf_image":
             return "visual_table_repair"
+        if self._llm_text_repair_available():
+            if target.repairability == "llm":
+                return "llm_text_repair"
+            # heuristic으로 이미 시도했는데 점수가 정체된 이슈는 LLM 수리로 승격한다.
+            if (
+                stalled
+                and target.route_name in attempted_routes
+                and f"llm:{target.route_name}" not in attempted_routes
+            ):
+                return "llm_text_repair"
         return "heuristic"
 
     def _repair_strategy_priority(
@@ -1126,10 +1164,12 @@ class WorkflowRunner:
         score_delta: float | None,
     ) -> int:
         stalled = iteration_count >= 1 and score_delta is not None and score_delta < 0.01
-        if strategy == "visual_table_repair" and stalled:
-            return 0
-        if strategy == "heuristic" and stalled:
-            return 1
+        if stalled:
+            if strategy == "visual_table_repair":
+                return 0
+            if strategy == "heuristic":
+                return 1
+            return 2
         if strategy == "heuristic":
             return 0
         return 1
@@ -1145,7 +1185,12 @@ class WorkflowRunner:
             return False
         if iteration_count < 1 or score_delta is None or score_delta >= 0.01:
             return False
-        return target.route_name in attempted_routes
+        if target.route_name not in attempted_routes:
+            return False
+        # heuristic이 정체됐어도 LLM 승격이 남아 있으면 스킵하지 않는다.
+        if self._llm_text_repair_available() and f"llm:{target.route_name}" not in attempted_routes:
+            return False
+        return True
 
     def _latest_snapshot_score_delta(self, state: WorkflowState) -> float | None:
         raw_snapshots = state.get("accuracy_snapshots") or []
