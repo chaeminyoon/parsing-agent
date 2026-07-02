@@ -96,6 +96,48 @@ evaluate에는 함정이 하나 있는데, 수리 후 점수가 이전보다 떨
 
 LLM 수리는 문제 구간을 라인 윈도우로 잘라 원문 근거와 함께 보낸다. confidence 임계값과 길이 제한을 걸고, 모델이 확신 없으면 그대로 반환하게 했다. 비전 수리는 원본 페이지를 crop해서 보내는데, 다중 페이지 표면 다음 페이지 상단도 같이 보낸다. 같은 표를 같은 이슈로 두 번 시도하지 않는다.
 
+## 프레임워크 구성
+
+```mermaid
+graph TB
+    subgraph 오케스트레이션
+        LG[LangGraph StateGraph<br/>조건부 엣지 루프, TypedDict 상태]
+    end
+    subgraph LLM
+        HTTP[OpenAI 호환 REST<br/>urllib 직접 호출 + 자체 재시도]
+        HTTP --> J[judge<br/>gpt-4.1-mini]
+        HTTP --> T[텍스트 수리<br/>gpt-4.1-mini]
+        HTTP --> V[표 재구성<br/>gpt-5-mini vision]
+    end
+    subgraph 문서 처리
+        ODL[opendataloader-pdf<br/>Java 파서]
+        FITZ[PyMuPDF<br/>렌더링 · 표 감지 · crop]
+        OCR[Surya OCR<br/>subprocess]
+    end
+    subgraph 관측
+        LS[LangSmith 트레이싱]
+        USE[llm_usage 비용 집계]
+    end
+    LG --> HTTP
+    LG --> ODL
+    LG --> FITZ
+    LG --> OCR
+    LG -.-> LS
+    HTTP -.-> USE
+```
+
+| 레이어 | 선택 | 역할 |
+|---|---|---|
+| 오케스트레이션 | LangGraph | 6개 노드 상태 머신. 조건부 엣지로 수리 루프를 돌리고, 상태는 `TypedDict`로 노드 간 계약을 고정 |
+| LLM 호출 | OpenAI 호환 REST (urllib) | judge, 텍스트 수리, 비전 재구성이 같은 HTTP 경로를 탄다. base URL만 바꾸면 호환 서버로 교체 가능 |
+| PDF 처리 | PyMuPDF | 페이지 렌더링(judge 그라운딩, 비전 crop), 괘선 표 감지, TEDS-lite 기준 그리드 추출 |
+| 기본 파서 | opendataloader-pdf | Java 기반. 파서 어댑터 레지스트리 뒤에 있어서 다른 파서로 교체하거나 추가할 수 있다 |
+| OCR | Surya (subprocess) | 스캔 페이지용. 실패해도 파이프라인은 계속 간다 (fail-open) |
+| 트레이싱 | LangSmith | 노드 입출력을 구조화 요약으로만 내보낸다. 문서 원문은 트레이스에 나가지 않는다 |
+| 테스트/패키징 | pytest, uv, GitHub Actions | 190개 테스트가 1초 안에 돈다. 전부 모킹 기반이라 API 키 없이 CI에서 돈다 |
+
+openai SDK 대신 urllib를 직접 쓰는 건 의도한 선택이다. 재시도 정책과 비용 계측을 호출 지점 한 곳(`_call_with_retry`)에서 통제하고 싶었고, SDK 버전 업그레이드에 끌려다니고 싶지 않았다. LangGraph를 쓴 이유는 반대로 직접 만들기 싫어서다. 조건부 엣지와 상태 병합을 손으로 짜면 그게 또 하나의 버그 표면이 된다.
+
 ## 벤치마크
 
 두 종류를 잰다. 채점기는 자체 결정적 메트릭이고, parsing-agent는 이 채점기를 내부에서 최적화하므로 유리하다는 점은 감안하고 봐야 한다. 중립 검증은 사람 라벨로 하는 게 맞고, `golden/`에 그 프로토콜이 있다.
