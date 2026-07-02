@@ -14,6 +14,7 @@ from langsmith import tracing_context
 
 from parsing_agent.config import WorkflowConfig
 from parsing_agent.interfaces import CandidateJudge
+from parsing_agent.llm_usage import record_llm_call
 from parsing_agent.monitoring import load_judge_prompt_hints
 from parsing_agent.models import DocumentSource, EvaluationMetrics, JudgeResult, ParseCandidate, load_document_source_text
 
@@ -123,21 +124,54 @@ def _is_retryable_error(exc: Exception) -> bool:
     return isinstance(exc, (urllib_error.URLError, TimeoutError, socket.timeout, ConnectionError))
 
 
-def _call_with_retry(post_fn, *, max_retries: int, backoff_seconds: float = 1.0, **kwargs) -> dict[str, Any]:
+def _call_with_retry(
+    post_fn,
+    *,
+    max_retries: int,
+    backoff_seconds: float = 1.0,
+    usage_stage: str = "judge",
+    **kwargs,
+) -> dict[str, Any]:
     """LLM HTTP 호출을 일시 오류에 한해 지수 백오프로 재시도한다.
 
     비-일시 오류(4xx 등)와 재시도 소진은 JudgeUnavailableError로 감싸
     호출자가 judge 실패를 한 가지 타입으로 처리할 수 있게 한다.
+    성공/실패와 무관하게 호출 횟수·소요시간·토큰을 llm_usage에 남긴다.
     """
+    model = None
+    payload = kwargs.get("payload")
+    if isinstance(payload, dict):
+        model = payload.get("model")
+    started = time.monotonic()
     last_error: Exception | None = None
+    attempts = 0
     for attempt in range(max_retries + 1):
+        attempts = attempt + 1
         try:
-            return post_fn(**kwargs)
+            response_payload = post_fn(**kwargs)
         except Exception as exc:  # noqa: BLE001 - 모든 실패를 JudgeUnavailableError로 정규화
             last_error = exc
             if attempt >= max_retries or not _is_retryable_error(exc):
                 break
             time.sleep(backoff_seconds * (2**attempt))
+            continue
+        record_llm_call(
+            stage=usage_stage,
+            model=model,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            ok=True,
+            attempts=attempts,
+            response_payload=response_payload,
+        )
+        return response_payload
+    record_llm_call(
+        stage=usage_stage,
+        model=model,
+        duration_ms=int((time.monotonic() - started) * 1000),
+        ok=False,
+        attempts=attempts,
+        error=f"{type(last_error).__name__}: {last_error}",
+    )
     raise JudgeUnavailableError(
         f"LLM judge request failed after {max_retries + 1} attempt(s): {type(last_error).__name__}: {last_error}"
     ) from last_error

@@ -7,11 +7,14 @@ from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any, Iterable
 from urllib import request
 
 import fitz
 from langsmith import tracing_context
+
+from parsing_agent.llm_usage import record_llm_call
 
 from parsing_agent.config import WorkflowConfig
 from parsing_agent.evaluation import (
@@ -493,9 +496,28 @@ def _post_response(
         },
         method="POST",
     )
-    with tracing_context(enabled=False):
-        with request.urlopen(req, timeout=timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8"))
+    started = time.monotonic()
+    try:
+        with tracing_context(enabled=False):
+            with request.urlopen(req, timeout=timeout_seconds) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        record_llm_call(
+            stage="visual_table_recovery",
+            model=payload.get("model"),
+            duration_ms=int((time.monotonic() - started) * 1000),
+            ok=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    record_llm_call(
+        stage="visual_table_recovery",
+        model=payload.get("model"),
+        duration_ms=int((time.monotonic() - started) * 1000),
+        ok=True,
+        response_payload=response_payload,
+    )
+    return response_payload
 
 
 def _extract_response_text(response_payload: dict[str, Any]) -> str:

@@ -241,6 +241,7 @@ class OpenAITargetedTextRepairer:
             response_payload = _call_with_retry(
                 _post_chat_completion,
                 max_retries=self._max_retries,
+                usage_stage="llm_text_repair",
                 url=f"{self._base_url}/chat/completions",
                 api_key=self._api_key,
                 payload={

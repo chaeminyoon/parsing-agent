@@ -15,6 +15,7 @@ from parsing_agent.ingestion import build_document_source
 from parsing_agent.judge import build_default_judge
 from parsing_agent.interfaces import CandidateEvaluator, CandidateRepairer
 from parsing_agent.llm_repair import build_default_targeted_text_repairer
+from parsing_agent.llm_usage import llm_usage_summary, reset_llm_usage
 from parsing_agent.monitoring import append_judge_feedback_record
 from parsing_agent.models import (
     DocumentSource,
@@ -313,6 +314,7 @@ class WorkflowRunner:
     ) -> tuple[WorkflowResult, dict[str, Path]]:
         self._source_text_cache.clear()
         self._candidate_content_cache.clear()
+        reset_llm_usage()
         resolved_output_dir = Path(output_dir)
         source = self._externalize_source_text(
             build_document_source(
@@ -342,6 +344,7 @@ class WorkflowRunner:
         feedback_log_path = append_judge_feedback_record(self._config, result)
         result.report.setdefault("monitoring", {})
         result.report["monitoring"]["judge_feedback_log_path"] = str(feedback_log_path)
+        result.report["monitoring"]["llm_usage"] = llm_usage_summary()
         written_artifacts = write_workflow_artifacts(result, output_dir)
         artifacts = self._finalize_artifacts(written_artifacts, expected_artifacts)
         artifacts.update({name: Path(path) for name, path in result.source.ocr_artifacts.items()})
