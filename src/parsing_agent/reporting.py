@@ -57,6 +57,7 @@ def build_report_payload(result: WorkflowResult) -> dict[str, object]:
             "table_preservation": result.metrics.table_preservation,
             "empty_block_penalty": result.metrics.empty_block_penalty,
             "repetition_penalty": result.metrics.repetition_penalty,
+            "table_cell_similarity": result.metrics.table_cell_similarity,
             "llm_judge_score": result.metrics.llm_judge_score,
             "judge": _build_judge_payload(result.metrics.judge_result, result.metrics.llm_judge_score),
             "total_score": result.metrics.total_score,
