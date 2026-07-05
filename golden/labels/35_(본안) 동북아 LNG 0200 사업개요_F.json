@@ -1,5 +1,16 @@
 {
   "document": "35_(본안) 동북아 LNG 0200 사업개요_F.pdf",
   "pipeline_output": "outputs/golden-run/35_(본안) 동북아 LNG 0200 사업개요_F/35_(본안) 동북아 LNG 0200 사업개요_F.md",
-  "ratings": []
+  "ratings": [
+    {
+      "rater": "cmyoon",
+      "labeled_at": "2026-07-05",
+      "overall_quality": 4,
+      "text_coverage": 5,
+      "table_correctness": 4,
+      "structure_preservation": 4,
+      "hallucination": false,
+      "notes": "표 2.4-1이 그림 2.4-2 순서에서 반복됨 (표 내용이 그림을 사이에 두고 이중 삽입) / 표 2.4-2 통합표는 개별내용으로 반영이 되어야함 (병합셀이 빈 칸으로 남아 행별 값 유실)"
+    }
+  ]
 }
