@@ -1,4 +1,4 @@
-<h1 align="center">parsing-agent</h1>
+<h1 align="center">PDF 파싱 에이전틱 워크플로우</h1>
 
 <p align="center">파싱 결과를 스스로 채점하고, 고칠 가치가 있는 것만 고치고, 망치면 되돌리는 PDF 파싱 루프</p>
 
