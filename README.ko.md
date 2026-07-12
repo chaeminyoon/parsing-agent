@@ -192,11 +192,15 @@ uv run python benchmarks/run_head_to_head.py data/*.pdf
 ```
 src/parsing_agent/
 ├── workflow.py        # LangGraph 상태 머신, 롤백, 시도 추적
+├── workflow_state.py  # 노드 간 상태/계획 dataclass
+├── tracing.py         # LangSmith 트레이스 구조화 요약
 ├── evaluation.py      # 결정적 메트릭, judge 통합, 이슈 분류
 ├── judge.py           # 멀티모달 LLM judge (재시도, JSON 폴백, fail-open)
 ├── repair.py          # 휴리스틱 수리, 수리 대상 진단
 ├── llm_repair.py      # 이슈 단위 LLM 텍스트 수리
-├── visual_repair.py   # 비전 표 재구성, crop 전략
+├── visual_repair.py   # 비전 호출, crop 전략, 패치 오케스트레이션
+├── visual_tasks.py    # 파인딩/메타데이터 기반 visual repair 태스크 구성
+├── visual_tables.py   # 표 텍스트 프리미티브 (HTML→마크다운, 블록 치환)
 ├── table_metrics.py   # TEDS-lite 셀 단위 표 유사도
 ├── llm_usage.py       # 스테이지별 LLM 비용 집계
 ├── parsers.py         # PDF 파서 어댑터 + 레지스트리

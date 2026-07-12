@@ -29,7 +29,10 @@ CI (`.github/workflows/ci.yml`) runs `uv sync --extra dev` + `uv run pytest -q`.
     `is_text_like*`, suffix 상수). 새 포맷은 여기부터 갱신
   - `textutil.py` — 인코딩 폴백 읽기(utf-8→cp949→euc-kr)·NFC 정규화·마크다운 표 렌더
   - `ingestion.py` — `DocumentSource` 구성, `extracted_text` 채우기, OCR 게이트
-  - `evaluation.py` / `judge.py` / `repair.py` / `visual_repair.py` — 품질 루프
+  - `evaluation.py` / `judge.py` / `repair.py` — 품질 루프
+  - `visual_repair.py`(비전 호출·패치) / `visual_tasks.py`(태스크 구성) /
+    `visual_tables.py`(표 텍스트 프리미티브) — 3계층 분할; 재수출로 기존 경로 유지
+  - `workflow_state.py`(상태 모델) / `tracing.py`(트레이스 요약) — workflow 분할
 - `tests/` — pytest; 새 파서 테스트는 가짜 `DocumentSource` + monkeypatch 패턴
   (`test_layout_first_parser.py`, `test_format_parsers.py` 참고)
 - `golden/`, `benchmarks/` — 원본 PDF·API 키가 필요한 별도 프로토콜 (CI 밖)

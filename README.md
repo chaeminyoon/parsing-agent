@@ -175,11 +175,15 @@ uv run python benchmarks/run_head_to_head.py data/*.pdf
 ```text
 src/parsing_agent/
 ├── workflow.py        # LangGraph state machine, rollback, attempt tracking
+├── workflow_state.py  # node-to-node state/plan dataclasses
+├── tracing.py         # structured LangSmith trace summaries
 ├── evaluation.py      # deterministic metrics, judge integration, issue taxonomy
 ├── judge.py           # multimodal LLM judge with retry and JSON fallback
 ├── repair.py          # heuristic repair and repair-target diagnosis
 ├── llm_repair.py      # issue-level LLM text repair
-├── visual_repair.py   # vision table reconstruction and crop strategy
+├── visual_repair.py   # vision calls, crop strategy, patch orchestration
+├── visual_tasks.py    # visual-repair task construction from findings/metadata
+├── visual_tables.py   # table text primitives (HTML→markdown, block patching)
 ├── table_metrics.py   # TEDS-lite cell-level table similarity
 ├── llm_usage.py       # stage-level LLM usage accounting
 ├── parsers.py         # PDF parser adapters + registry
