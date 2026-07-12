@@ -98,6 +98,11 @@ class WorkflowConfig:
     post_loop_normalization_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_POST_LOOP_NORMALIZATION_ENABLED", True)
     )
+    # 구조화 포맷(docx/pptx/csv/html/json/yaml)을 마크다운 형태가 아니라
+    # 장식 제거 후 콘텐츠로 평가한다. 끄면 기존 형태 비교로 돌아간다.
+    structured_content_evaluation_enabled: bool = field(
+        default_factory=lambda: _env_flag("PARSING_AGENT_STRUCTURED_CONTENT_EVALUATION_ENABLED", True)
+    )
     table_cell_metric_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_TABLE_CELL_METRIC_ENABLED", True)
     )

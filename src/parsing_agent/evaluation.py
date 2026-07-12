@@ -7,6 +7,7 @@ from typing import Any
 
 from parsing_agent.config import WorkflowConfig, WorkflowWeights
 from parsing_agent.filetype import is_pdf_source as _is_pdf_source
+from parsing_agent.format_parsers import STRUCTURED_SUFFIX_PARSERS
 from parsing_agent.interfaces import CandidateEvaluator, CandidateJudge
 from parsing_agent.table_metrics import calculate_table_cell_similarity, extract_pdf_table_grids
 from parsing_agent.models import (
@@ -226,6 +227,81 @@ def calculate_table_preservation(source_text: str, candidate_text: str) -> float
     source_tables = _count_structural_lines(source_text)["table"]
     candidate_tables = _count_structural_lines(candidate_text)["table"]
     return _count_similarity(source_tables, candidate_tables)
+
+
+# --- 구조화 포맷(비-PDF) 콘텐츠 기반 평가 ---------------------------------
+#
+# docx/csv/html/json 같은 구조화 포맷의 원문 텍스트는 평문 직렬화라서,
+# 마크다운 후보와 "형태"를 비교하면 파서가 구조를 살린 것 자체가 감점된다
+# (원문에 파이프 표 0개 vs 후보 N개 → 보존율 0). 아래 함수들은 장식을 걷어낸
+# 콘텐츠를 비교해 이 범주 오류를 없앤다. 콘텐츠 손실은 여전히
+# coverage/similarity가 잡는다.
+
+_MD_HEADING_PREFIX_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+_MD_BULLET_PREFIX_RE = re.compile(r"^\s*[-*+]\s+")
+_MD_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_MD_COMMENT_LINE_RE = re.compile(r"^\s*<!--.*-->\s*$")
+
+
+def _is_table_separator_line(line: str) -> bool:
+    stripped = line.strip()
+    if not _looks_like_table_line(stripped):
+        return False
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    return bool(cells) and all(cell and set(cell) <= {":", "-"} for cell in cells)
+
+
+def strip_markdown_decorations(text: str) -> str:
+    """구조화 파서가 추가한 마크다운 장식을 걷어내고 콘텐츠 텍스트만 남긴다."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or _MD_COMMENT_LINE_RE.match(stripped):
+            continue
+        if _is_table_separator_line(stripped):
+            continue
+        if _looks_like_table_line(stripped):
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            content = " ".join(cell for cell in cells if cell)
+        else:
+            content = _MD_HEADING_PREFIX_RE.sub("", stripped)
+            content = _MD_BULLET_PREFIX_RE.sub("", content)
+        content = _MD_BOLD_RE.sub(r"\1", content)
+        if content.strip():
+            lines.append(content.strip())
+    return "\n".join(lines)
+
+
+def calculate_content_similarity(source_text: str, candidate_text: str) -> float:
+    """마크업 형태와 무관한 콘텐츠 토큰 시퀀스 유사도.
+
+    양쪽을 단어 토큰 시퀀스로 정규화한 뒤 `SequenceMatcher`로 비교한다.
+    구두점·마크다운 문법 차이는 무시되지만 토큰 누락·순서 변경은 반영된다.
+    """
+    normalized_source = " ".join(_WORD_RE.findall(source_text.lower()))
+    normalized_candidate = " ".join(_WORD_RE.findall(candidate_text.lower()))
+    if not normalized_source and not normalized_candidate:
+        return 1.0
+    if not normalized_source or not normalized_candidate:
+        return 0.0
+    return SequenceMatcher(None, normalized_source, normalized_candidate).ratio()
+
+
+def _structured_structure_retention(source_text: str, content_candidate: str) -> float:
+    """구조화 포맷의 구조 보존 — 원문에 마커가 있을 때만 형태를 비교한다."""
+    source_counts = _count_structural_lines(source_text)
+    if any(source_counts[kind] for kind in ("heading", "list", "table")):
+        return calculate_structure_retention(source_text, content_candidate)
+    # 평문 직렬화에는 구조 마커가 없다 — 파서가 추가한 구조를 감점하지 않는다.
+    return 1.0
+
+
+def _structured_table_preservation(source_text: str, candidate_text: str) -> float:
+    """구조화 포맷의 표 보존 — 원문에 표가 없으면 잃을 것도 없다."""
+    source_tables = _count_structural_lines(source_text)["table"]
+    if source_tables == 0:
+        return 1.0
+    return calculate_table_preservation(source_text, candidate_text)
 
 
 def _extract_pdf_structure_cues(text: str) -> Counter[str]:
@@ -974,9 +1050,18 @@ class DeterministicEvaluator(CandidateEvaluator):
         """
         source_text = load_document_source_text(source)
         candidate_text = candidate.content
+        structured = (
+            getattr(self._config, "structured_content_evaluation_enabled", True)
+            and not _is_pdf_source(source)
+            and source.path.suffix.lower() in STRUCTURED_SUFFIX_PARSERS
+        )
         if _is_pdf_source(source):
             structure_retention = _calculate_pdf_structure_retention(source_text, candidate_text)
             table_preservation = _calculate_pdf_table_preservation(source_text, candidate_text)
+        elif structured:
+            content_candidate = strip_markdown_decorations(candidate_text)
+            structure_retention = _structured_structure_retention(source_text, content_candidate)
+            table_preservation = _structured_table_preservation(source_text, candidate_text)
         else:
             structure_retention = calculate_structure_retention(source_text, candidate_text)
             table_preservation = calculate_table_preservation(source_text, candidate_text)
@@ -984,9 +1069,14 @@ class DeterministicEvaluator(CandidateEvaluator):
         if table_structure_consistency < 1.0:
             # 라벨은 남았지만 열 구조가 깨진 표를 라벨 매칭 점수와 별개로 반영한다.
             table_preservation = _clamp(table_preservation * (0.7 + 0.3 * table_structure_consistency))
+        similarity = (
+            calculate_content_similarity(source_text, strip_markdown_decorations(candidate_text))
+            if structured
+            else calculate_normalized_similarity(source_text, candidate_text)
+        )
         metrics = EvaluationMetrics(
             text_coverage=calculate_text_coverage(source_text, candidate_text),
-            normalized_similarity=calculate_normalized_similarity(source_text, candidate_text),
+            normalized_similarity=similarity,
             structure_retention=structure_retention,
             table_preservation=table_preservation,
             empty_block_penalty=calculate_empty_block_penalty(candidate_text),
