@@ -46,7 +46,7 @@ uv sync
 ```bash
 export OPENAI_API_KEY=sk-...   # optional
 
-uv run python -m parsing_agent.cli "document.pdf" --output-dir outputs/run-1
+uv run parsing-agent document.pdf --output-dir outputs/run-1
 ```
 
 Each document produces a repaired Markdown file and a structured decision report.
@@ -62,6 +62,149 @@ The JSON report contains score trajectories, diagnosed issues, repair plans, ski
 ```bash
 uv run pytest
 ```
+
+## Usage Scenarios — captured output
+
+All five scenarios below are **unedited results of actual runs** on the inputs bundled in
+`examples/`. Reproducible without an API key: `uv run parsing-agent examples/<file>`.
+
+### 1. PDF report — ruled tables to markdown
+
+The core problem in EIA-style reports: ruled tables. `examples/dredging_plan.pdf` is a real PDF with a ruled table.
+
+```console
+$ uv run parsing-agent examples/dredging_plan.pdf
+Best score: 0.901
+Document: dredging_plan.pdf
+Stats: 137 chars, 24 words, 10 lines
+Output: outputs/dredging_plan.md
+Report: outputs/dredging_plan.json
+```
+
+`outputs/dredging_plan.md` (full):
+
+```markdown
+# 제5장 저감방안
+
+공사 시 발생하는 부유사 확산을 저감하기 위하여 오탁방지막을 설치한다. 설치 구간과 규격은 아래 표와 같다.
+
+|구간|연장(m)|형식|
+|---|---|---|
+|북측 호안|320|고정식|
+|남측 개구부|180|이동식|
+```
+
+The chapter title survives as a heading and the ruled table as a 3×3 markdown table. The quality-gate verdict from `outputs/dredging_plan.json`:
+
+```json
+"quality_gate": {"passed": true, "selected_candidate_passed": true, "selected_candidate_failed_checks": []}
+```
+
+### 2. Legacy CSV — feed cp949 encoding as-is
+
+Public-sector reality: CSVs arrive in euc-kr/cp949. `examples/kmst_stats.csv` is cp949-encoded.
+
+```console
+$ uv run parsing-agent examples/kmst_stats.csv
+Best score: 1.000
+Document: kmst_stats.csv
+Stats: 132 chars, 49 words, 7 lines
+```
+
+```markdown
+| 사고유형 | 재결건수 | 업무정지월 |
+| --- | --- | --- |
+| 충돌 | 42 | 52 |
+| 인명사상 | 31 | 47 |
+| 화재폭발 | 18 | 33 |
+| 좌초 | 15 | 28 |
+| 접촉 | 11 | 19 |
+```
+
+Encoding fallback (utf-8 → cp949 → euc-kr) kicks in automatically; the delimiter is sniffed and the data rendered as a markdown table. No conversion step needed.
+
+### 3. Word report (.docx) — structure intact
+
+`examples/eia_summary.docx` is a Word document with two heading levels, bullets, and a table.
+
+```console
+$ uv run parsing-agent examples/eia_summary.docx
+Best score: 1.000
+```
+
+```markdown
+# 제4장 지역개황
+
+대상지역은 광양항 낙포부두 일원이며, 조사 범위는 반경 5km로 설정하였다.
+
+## 4.1 대기질
+
+- 측정 지점: 3개소 (부두, 배후단지, 주거지역)
+
+- 측정 항목: PM-10, PM-2.5, NO2
+
+| 지점 | PM-10 | 판정 |
+| --- | --- | --- |
+| 부두 | 48 | 기준 이내 |
+| 배후단지 | 41 | 기준 이내 |
+| 주거지역 | 36 | 기준 이내 |
+```
+
+Heading styles→`#`/`##`, numbering→bullets, tables→markdown tables — all via stdlib OOXML parsing, no python-docx.
+
+### 4. Web notice (.html) — keep only what is visible
+
+`examples/notice.html` contains `<script>trackVisit(...)</script>`.
+
+```console
+$ uv run parsing-agent examples/notice.html
+Best score: 1.000
+```
+
+```markdown
+# 낙포부두 리뉴얼사업 입찰 공고
+
+본 공고는 환경영향평가 협의 완료에 따라 게시한다.
+
+## 일정
+
+| 단계 | 기한 |
+| --- | --- |
+| 서류 접수 | 2026-07-25 |
+| 결과 발표 | 2026-08-08 |
+
+- 문의: 항만시설과
+
+- 제출: 전자입찰시스템
+```
+
+Scripts and styles never reach the output — only visible text, with markdown structure.
+
+### 5. Config/data files (.yaml/.json) — hierarchies as lists, record arrays as tables
+
+`examples/pipeline.yaml`:
+
+```console
+$ uv run parsing-agent examples/pipeline.yaml
+Best score: 0.800
+```
+
+```markdown
+- **service:** parse-everything
+- **quality_gate:**
+  - **min_total_score:** 0.7
+  - **min_text_coverage:** 0.7
+- **repair_rounds:** 3
+- **parsers:**
+
+| name | role |
+| --- | --- |
+| opendataloader-pdf | primary |
+| layout-first-pdf | support |
+```
+
+Nested mappings become indented lists; the homogeneous object array (`parsers`) automatically becomes a table.
+
 
 ## Workflow
 

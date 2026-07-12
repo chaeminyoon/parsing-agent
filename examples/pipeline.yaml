@@ -1,0 +1,10 @@
+service: parse-everything
+quality_gate:
+  min_total_score: 0.7
+  min_text_coverage: 0.7
+repair_rounds: 3
+parsers:
+  - name: opendataloader-pdf
+    role: primary
+  - name: layout-first-pdf
+    role: support

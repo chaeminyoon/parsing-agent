@@ -47,7 +47,7 @@ uv sync
 ```bash
 export OPENAI_API_KEY=sk-...   # 선택. 없어도 동작한다
 
-uv run python -m parsing_agent.cli "문서.pdf" --output-dir outputs/run-1
+uv run parsing-agent 문서.pdf --output-dir outputs/run-1
 ```
 
 문서마다 두 파일이 나온다.
@@ -63,6 +63,149 @@ JSON 리포트에는 라운드별 점수 궤적, 진단된 이슈, 수리 계획
 ```bash
 uv run pytest
 ```
+
+## 사용 시나리오 — 실측 출력
+
+아래 다섯 시나리오는 전부 `examples/`에 동봉된 입력으로 **방금 실행한 무편집 결과**다.
+API 키 없이 재현된다: `uv run parsing-agent examples/<파일>`.
+
+### 1. PDF 보고서 — 괘선 표를 마크다운으로
+
+환경영향평가류 보고서의 핵심 문제: 괘선 표. `examples/dredging_plan.pdf`는 실제 괘선 표가 그려진 PDF다.
+
+```console
+$ uv run parsing-agent examples/dredging_plan.pdf
+Best score: 0.901
+Document: dredging_plan.pdf
+Stats: 137 chars, 24 words, 10 lines
+Output: outputs/dredging_plan.md
+Report: outputs/dredging_plan.json
+```
+
+`outputs/dredging_plan.md` (전문):
+
+```markdown
+# 제5장 저감방안
+
+공사 시 발생하는 부유사 확산을 저감하기 위하여 오탁방지막을 설치한다. 설치 구간과 규격은 아래 표와 같다.
+
+|구간|연장(m)|형식|
+|---|---|---|
+|북측 호안|320|고정식|
+|남측 개구부|180|이동식|
+```
+
+장 제목이 헤딩으로, 괘선 표가 3×3 마크다운 표로 살아남았다. `outputs/dredging_plan.json`의 품질 게이트 판정:
+
+```json
+"quality_gate": {"passed": true, "selected_candidate_passed": true, "selected_candidate_failed_checks": []}
+```
+
+### 2. 레거시 CSV — cp949 인코딩 그대로 넣기
+
+공공 데이터 현실: euc-kr/cp949로 내려오는 CSV. `examples/kmst_stats.csv`는 cp949로 인코딩되어 있다.
+
+```console
+$ uv run parsing-agent examples/kmst_stats.csv
+Best score: 1.000
+Document: kmst_stats.csv
+Stats: 132 chars, 49 words, 7 lines
+```
+
+```markdown
+| 사고유형 | 재결건수 | 업무정지월 |
+| --- | --- | --- |
+| 충돌 | 42 | 52 |
+| 인명사상 | 31 | 47 |
+| 화재폭발 | 18 | 33 |
+| 좌초 | 15 | 28 |
+| 접촉 | 11 | 19 |
+```
+
+인코딩 폴백(utf-8 → cp949 → euc-kr)이 자동으로 동작하고, 구분자를 스니핑해 마크다운 표로 렌더링한다. 변환하고 넣을 필요가 없다.
+
+### 3. Word 보고서(.docx) — 구조를 잃지 않고
+
+`examples/eia_summary.docx`는 헤딩 2단계·불릿·표가 있는 Word 문서다.
+
+```console
+$ uv run parsing-agent examples/eia_summary.docx
+Best score: 1.000
+```
+
+```markdown
+# 제4장 지역개황
+
+대상지역은 광양항 낙포부두 일원이며, 조사 범위는 반경 5km로 설정하였다.
+
+## 4.1 대기질
+
+- 측정 지점: 3개소 (부두, 배후단지, 주거지역)
+
+- 측정 항목: PM-10, PM-2.5, NO2
+
+| 지점 | PM-10 | 판정 |
+| --- | --- | --- |
+| 부두 | 48 | 기준 이내 |
+| 배후단지 | 41 | 기준 이내 |
+| 주거지역 | 36 | 기준 이내 |
+```
+
+Heading 스타일→`#`/`##`, 번호 매기기→불릿, 표→마크다운 표. python-docx 없이 stdlib OOXML 파싱만으로 처리된다.
+
+### 4. 웹 공지(.html) — 보이는 것만 남긴다
+
+`examples/notice.html`에는 `<script>trackVisit(...)</script>`가 들어 있다.
+
+```console
+$ uv run parsing-agent examples/notice.html
+Best score: 1.000
+```
+
+```markdown
+# 낙포부두 리뉴얼사업 입찰 공고
+
+본 공고는 환경영향평가 협의 완료에 따라 게시한다.
+
+## 일정
+
+| 단계 | 기한 |
+| --- | --- |
+| 서류 접수 | 2026-07-25 |
+| 결과 발표 | 2026-08-08 |
+
+- 문의: 항만시설과
+
+- 제출: 전자입찰시스템
+```
+
+script/style은 결과에 없다 — 가시 텍스트만 마크다운 구조로 남는다.
+
+### 5. 설정·데이터 파일(.yaml/.json) — 계층은 리스트로, 레코드 배열은 표로
+
+`examples/pipeline.yaml`:
+
+```console
+$ uv run parsing-agent examples/pipeline.yaml
+Best score: 0.800
+```
+
+```markdown
+- **service:** parse-everything
+- **quality_gate:**
+  - **min_total_score:** 0.7
+  - **min_text_coverage:** 0.7
+- **repair_rounds:** 3
+- **parsers:**
+
+| name | role |
+| --- | --- |
+| opendataloader-pdf | primary |
+| layout-first-pdf | support |
+```
+
+중첩 매핑은 들여쓴 리스트로, 동질 객체 배열(`parsers`)은 자동으로 표가 된다.
+
 
 ## 동작 방식
 

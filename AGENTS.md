@@ -12,7 +12,7 @@ repair → finalize (LangGraph). Parsers are swappable adapters behind
 uv sync --extra dev          # install (Python >= 3.12 recommended; CI uses 3.12)
 uv run pytest -q             # full test suite — must stay green
 uvx ruff check src tests     # lint (pyproject [tool.ruff])
-uv run python -m parsing_agent <input> <output_dir>   # run the workflow CLI
+uv run parsing-agent <input> --output-dir <dir>       # run the workflow CLI
 ```
 
 CI (`.github/workflows/ci.yml`) runs `uv sync --extra dev` + `uv run pytest -q`.
