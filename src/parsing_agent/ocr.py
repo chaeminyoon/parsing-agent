@@ -10,6 +10,7 @@ from time import perf_counter
 from typing import Any
 
 from parsing_agent.config import WorkflowConfig
+from parsing_agent.filetype import is_image, is_pdf
 
 
 @dataclass(slots=True)
@@ -104,14 +105,6 @@ class _TableMarkdownParser(HTMLParser):
         return "\n".join(markdown_rows)
 
 
-# 로드맵의 OCR 연동 이미지 포맷. surya CLI는 이미지 입력을 그대로 받는다.
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tiff", ".tif"}
-
-
-def is_image_input(media_type: str, path: Path) -> bool:
-    return media_type.startswith("image/") or path.suffix.lower() in IMAGE_SUFFIXES
-
-
 def should_run_ocr(
     *,
     media_type: str,
@@ -124,10 +117,10 @@ def should_run_ocr(
     if config.ocr_provider.strip().lower() != "surya":
         return False
     # 이미지 입력은 OCR이 유일한 텍스트 경로이므로 길이 기준 없이 항상 실행한다.
-    if is_image_input(media_type, path):
+    # (surya CLI는 이미지 입력을 그대로 받는다.)
+    if is_image(media_type, path):
         return True
-    is_pdf = media_type == "application/pdf" or path.suffix.lower() == ".pdf"
-    if not is_pdf:
+    if not is_pdf(media_type, path):
         return False
     return len((extracted_text or "").strip()) < config.ocr_min_text_characters
 

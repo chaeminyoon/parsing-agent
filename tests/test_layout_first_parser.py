@@ -7,11 +7,10 @@ from parsing_agent.models import DocumentSource
 from parsing_agent.parsers import (
     LayoutFirstPdfParserAdapter,
     _TABLE_LABEL_LINE_RE,
-    _read_text_with_fallback,
-    _rows_to_markdown,
     _table_to_html,
     build_default_parser_registry,
 )
+from parsing_agent.textutil import read_text_with_fallback, rows_to_markdown
 
 
 class _SimpleTable:
@@ -99,7 +98,7 @@ def test_read_text_with_fallback_reads_cp949_korean(tmp_path) -> None:
     sample_path = tmp_path / "sample.md"
     sample_path.write_bytes("제4장 지역개황\n표 4.2-2 토지이용 현황\n".encode("cp949"))
 
-    text = _read_text_with_fallback(sample_path)
+    text = read_text_with_fallback(sample_path)
 
     assert "제4장 지역개황" in text
     assert "표 4.2-2" in text
@@ -109,7 +108,7 @@ def test_read_text_with_fallback_normalizes_nbsp(tmp_path) -> None:
     sample_path = tmp_path / "sample.md"
     sample_path.write_text("제4장\u00a0지역개황", encoding="utf-8")
 
-    text = _read_text_with_fallback(sample_path)
+    text = read_text_with_fallback(sample_path)
 
     assert text == "제4장 지역개황"
 
@@ -210,7 +209,7 @@ def _build_pdf_source(tmp_path: Path, *, extracted_text: str = "", page_count: i
 
 
 def test_rows_to_markdown_normalizes_cells() -> None:
-    markdown = _rows_to_markdown([["a|b", None], ["line\nbreak", 3]])
+    markdown = rows_to_markdown([["a|b", None], ["line\nbreak", 3]])
 
     assert markdown == "| a\\|b |  |\n| --- | --- |\n| line break | 3 |"
 

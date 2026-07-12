@@ -5,7 +5,6 @@ import base64
 import html
 import json
 import mimetypes
-import unicodedata
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
@@ -22,8 +21,21 @@ except ImportError:  # pragma: no cover - optional dependency guard
     opendataloader_pdf = None
 
 from parsing_agent.config import WorkflowConfig
+from parsing_agent.filetype import TEXT_SUFFIXES, is_pdf_source as _is_pdf_source, is_text_like_source
+from parsing_agent.format_parsers import (
+    CsvParserAdapter,
+    DataParserAdapter,
+    DocxParserAdapter,
+    HtmlParserAdapter,
+    PptxParserAdapter,
+)
 from parsing_agent.interfaces import ParserAdapter
 from parsing_agent.models import DocumentSource, ParseCandidate
+from parsing_agent.textutil import (
+    clean_table_cell as _clean_cell,
+    read_text_with_fallback as _read_text_with_fallback,
+    rows_to_markdown as _rows_to_markdown,
+)
 
 _WORD_RE = re.compile(r"\w+")
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\((?P<target><[^>]+>|[^)]+)\)")
@@ -36,11 +48,6 @@ _TABLE_LABEL_CAPTURE_RE = re.compile(
     re.IGNORECASE,
 )
 _PAGE_MARKER_RE = re.compile(r"^<!-- page (\d+) -->$")
-_TEXT_READ_ENCODINGS = ("utf-8", "utf-8-sig", "cp949", "euc-kr")
-
-
-def _is_pdf_source(source: DocumentSource) -> bool:
-    return source.media_type == "application/pdf" or source.path.suffix.lower() == ".pdf"
 
 
 def _extract_pdf_page_texts(source: DocumentSource) -> list[str]:
@@ -48,30 +55,6 @@ def _extract_pdf_page_texts(source: DocumentSource) -> list[str]:
         return []
     reader = PdfReader(str(source.path))
     return [(page.extract_text() or "").strip() for page in reader.pages]
-
-
-def _normalize_markdown_text(text: str) -> str:
-    normalized = text.replace("\ufeff", "").replace("\u00a0", " ")
-    return unicodedata.normalize("NFC", normalized)
-
-
-def _read_text_with_fallback(path: Path) -> str:
-    last_error: UnicodeDecodeError | None = None
-    for encoding in _TEXT_READ_ENCODINGS:
-        try:
-            return _normalize_markdown_text(path.read_text(encoding=encoding))
-        except UnicodeDecodeError as exc:
-            last_error = exc
-            continue
-    if last_error is not None:
-        raise last_error
-    return _normalize_markdown_text(path.read_text(encoding="utf-8"))
-
-
-def _clean_cell(value: object) -> str:
-    if value is None:
-        return ""
-    return " ".join(str(value).replace("\n", " ").split()).replace("|", "\\|")
 
 
 def _clean_html_cell(value: object) -> str:
@@ -432,23 +415,6 @@ def _merge_table_grounding_metadata(
     return merged
 
 
-def _rows_to_markdown(rows: list[list[object]]) -> str:
-    cleaned_rows = [[_clean_cell(cell) for cell in row] for row in rows if any(_clean_cell(cell) for cell in row)]
-    if not cleaned_rows:
-        return ""
-
-    max_columns = max(len(row) for row in cleaned_rows)
-    normalized_rows = [row + [""] * (max_columns - len(row)) for row in cleaned_rows]
-    header = normalized_rows[0]
-    body = normalized_rows[1:]
-    lines = [
-        "| " + " | ".join(header) + " |",
-        "| " + " | ".join("---" for _ in header) + " |",
-    ]
-    lines.extend("| " + " | ".join(row) + " |" for row in body)
-    return "\n".join(lines)
-
-
 def _normalized_cell_key(cell: object) -> tuple[float, float, float, float] | None:
     if cell is None:
         return None
@@ -744,14 +710,15 @@ def _caption_image_block(page: fitz.Page, rect: fitz.Rect, page_index: int, conf
 
 class LocalTextParserAdapter(ParserAdapter):
     name = "text-fallback"
-    _TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".json", ".yaml", ".yml", ".html", ".htm", ".xml"}
+    _TEXT_SUFFIXES = TEXT_SUFFIXES
 
     def parse(self, source: DocumentSource, config: WorkflowConfig) -> list[ParseCandidate]:
         if not self._is_text_like(source):
             return []
 
-        # Current local fallback is intentionally deterministic and UTF-8 only.
-        content = source.path.read_text(encoding="utf-8")
+        # 결정론적 로컬 폴백. 인코딩은 UTF-8 계열 → cp949/euc-kr 순으로 시도한다
+        # (레거시 완성형 .txt가 전체 파서 실패로 이어지던 버그 수정).
+        content = _read_text_with_fallback(source.path)
         return [
             ParseCandidate(
                 parser_name=self.name,
@@ -763,7 +730,7 @@ class LocalTextParserAdapter(ParserAdapter):
         ]
 
     def _is_text_like(self, source: DocumentSource) -> bool:
-        return source.media_type.startswith("text/") or source.path.suffix.lower() in self._TEXT_SUFFIXES
+        return is_text_like_source(source)
 
 
 class ExtractedSourceTextParserAdapter(ParserAdapter):
@@ -772,7 +739,7 @@ class ExtractedSourceTextParserAdapter(ParserAdapter):
     def parse(self, source: DocumentSource, config: WorkflowConfig) -> list[ParseCandidate]:
         if source.extracted_text is None:
             return []
-        if source.media_type.startswith("text/") or source.path.suffix.lower() in LocalTextParserAdapter._TEXT_SUFFIXES:
+        if is_text_like_source(source):
             return []
         if not source.extracted_text.strip():
             return []
@@ -1075,16 +1042,6 @@ class ParserRegistry:
 
 
 def build_default_parser_registry() -> ParserRegistry:
-    # Local import: format_parsers reuses helpers from this module, so a
-    # top-level import here would create a cycle.
-    from parsing_agent.format_parsers import (
-        CsvParserAdapter,
-        DataParserAdapter,
-        DocxParserAdapter,
-        HtmlParserAdapter,
-        PptxParserAdapter,
-    )
-
     return ParserRegistry(
         [
             LayoutFirstPdfParserAdapter(),

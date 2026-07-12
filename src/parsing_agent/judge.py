@@ -13,6 +13,7 @@ import fitz
 from langsmith import tracing_context
 
 from parsing_agent.config import WorkflowConfig
+from parsing_agent.filetype import is_pdf_source as _is_pdf_source
 from parsing_agent.interfaces import CandidateJudge
 from parsing_agent.llm_usage import record_llm_call
 from parsing_agent.monitoring import load_judge_prompt_hints
@@ -273,10 +274,6 @@ def _coerce_table_findings(value: Any) -> list[dict[str, Any]]:
         if finding:
             findings.append(finding)
     return findings
-
-
-def _is_pdf_source(source: DocumentSource) -> bool:
-    return source.media_type == "application/pdf" or source.path.suffix.lower() == ".pdf"
 
 
 def _extract_table_labels(text: str, limit: int = 5) -> list[str]:

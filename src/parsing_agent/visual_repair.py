@@ -17,6 +17,7 @@ from langsmith import tracing_context
 from parsing_agent.llm_usage import record_llm_call
 
 from parsing_agent.config import WorkflowConfig
+from parsing_agent.filetype import is_pdf_source as _is_pdf_source
 from parsing_agent.evaluation import (
     TABLE_ISSUE_MERGED_CELL_LOSS,
     TABLE_ISSUE_MISSING_HEADER,
@@ -52,10 +53,6 @@ Rules:
 - Do not invent unreadable values; leave uncertain cells blank.
 - If the target table is not visible enough to recover, return empty markdown and low confidence.
 - Do not include prose outside the JSON object."""
-
-
-def _is_pdf_source(source: DocumentSource) -> bool:
-    return source.media_type == "application/pdf" or source.path.suffix.lower() == ".pdf"
 
 
 @dataclass(frozen=True, slots=True)

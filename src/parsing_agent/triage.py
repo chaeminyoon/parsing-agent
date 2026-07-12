@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import fitz
 
 from parsing_agent.config import WorkflowConfig
+from parsing_agent.filetype import is_pdf_source
 from parsing_agent.models import DocumentSource
 
 
@@ -63,7 +64,7 @@ def triage_document(source: DocumentSource, config: WorkflowConfig) -> TriageDec
             page_count=source.page_count,
         )
 
-    if source.media_type != "application/pdf" and source.path.suffix.lower() != ".pdf":
+    if not is_pdf_source(source):
         return TriageDecision(
             complexity="unknown",
             selected_parsers=list(config.parser_names),

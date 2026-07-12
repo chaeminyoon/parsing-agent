@@ -4,13 +4,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from parsing_agent.textutil import read_text_with_fallback
+
 
 def load_document_source_text(source: "DocumentSource") -> str:
     if source.extracted_text is not None:
         return source.extracted_text
     if source.media_type.startswith("text/"):
         try:
-            return source.path.read_text(encoding="utf-8")
+            return read_text_with_fallback(source.path)
         except UnicodeDecodeError:
             return source.path.read_text(encoding="utf-8", errors="replace")
     raise ValueError(

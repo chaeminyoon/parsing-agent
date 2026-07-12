@@ -5,6 +5,7 @@ from dataclasses import replace
 import re
 from typing import Any
 
+from parsing_agent.filetype import is_pdf
 from parsing_agent.interfaces import CandidateRepairer
 from parsing_agent.models import DocumentSource, EvaluationIssue, EvaluationMetrics, ParseCandidate, RepairAction
 from parsing_agent.visual_repair import (
@@ -889,8 +890,7 @@ def _restore_pdf_boundaries(text: str) -> str:
 
 
 def _is_pdf_candidate(source: DocumentSource, candidate: ParseCandidate) -> bool:
-    source_path = candidate.source_path or source.path
-    return source.media_type == "application/pdf" or source_path.suffix.lower() == ".pdf"
+    return is_pdf(source.media_type, candidate.source_path or source.path)
 
 
 def _should_defer_table_rewrite(source: DocumentSource, candidate: ParseCandidate, metrics: EvaluationMetrics) -> bool:

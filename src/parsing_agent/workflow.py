@@ -11,6 +11,8 @@ from langgraph.graph import END, START, StateGraph
 
 from parsing_agent.config import WorkflowConfig
 from parsing_agent.evaluation import DeterministicEvaluator
+from parsing_agent.filetype import is_image_source, is_pdf_source
+from parsing_agent.format_parsers import STRUCTURED_SUFFIX_PARSERS
 from parsing_agent.ingestion import build_document_source
 from parsing_agent.judge import build_default_judge
 from parsing_agent.interfaces import CandidateEvaluator, CandidateRepairer
@@ -1142,18 +1144,13 @@ class WorkflowRunner:
         return candidates
 
     def _base_parser_name_for_source(self, source: DocumentSource) -> str:
-        from parsing_agent.format_parsers import STRUCTURED_SUFFIX_PARSERS
-        from parsing_agent.ocr import IMAGE_SUFFIXES
-
         suffix = source.path.suffix.lower()
         # Structured adapters win over the raw-text fallback (text/csv, text/html 등).
         structured_name = STRUCTURED_SUFFIX_PARSERS.get(suffix)
         if structured_name and self._parser_registry.has(structured_name):
             return structured_name
         # 이미지 입력은 인제스천의 OCR이 extracted_text를 채우고 source-text가 소비한다.
-        if (suffix in IMAGE_SUFFIXES or source.media_type.startswith("image/")) and self._parser_registry.has(
-            "source-text"
-        ):
+        if is_image_source(source) and self._parser_registry.has("source-text"):
             return "source-text"
         if source.media_type.startswith("text/") and self._parser_registry.has("text-fallback"):
             return "text-fallback"
@@ -1406,7 +1403,7 @@ class WorkflowRunner:
     ) -> list[str]:
         if not self._is_usable_candidate(candidate):
             return ["empty_content"]
-        if source.media_type != "application/pdf" and source.path.suffix.lower() != ".pdf":
+        if not is_pdf_source(source):
             return []
         if self._has_meaningful_pdf_content(candidate.content):
             return []

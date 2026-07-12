@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - exercised via the None branch in tests
 from parsing_agent.config import WorkflowConfig
 from parsing_agent.interfaces import ParserAdapter
 from parsing_agent.models import DocumentSource, ParseCandidate
-from parsing_agent.parsers import _normalize_markdown_text, _read_text_with_fallback, _rows_to_markdown
+from parsing_agent.textutil import normalize_markdown_text, read_text_with_fallback, rows_to_markdown
 
 # Single source of truth for suffix→base-parser routing (used by workflow).
 STRUCTURED_SUFFIX_PARSERS = {
@@ -55,11 +55,6 @@ _P = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
 _HEADING_STYLE_RE = re.compile(r"heading\s*([1-9])", re.IGNORECASE)
 
 
-def read_text_with_fallback(path: Path) -> str:
-    """Public re-export for ingestion (UTF-8 first, then Korean codecs)."""
-    return _read_text_with_fallback(path)
-
-
 # ---------------------------------------------------------------------------
 # Shared block model: ("heading", level, text) | ("para", text) | ("list", text)
 # | ("table", rows) | ("marker", label)
@@ -77,12 +72,12 @@ def _render_blocks_markdown(blocks: list[tuple]) -> str:
         elif kind == "list":
             parts.append(f"- {block[1]}")
         elif kind == "table":
-            rendered = _rows_to_markdown(block[1])
+            rendered = rows_to_markdown(block[1])
             if rendered:
                 parts.append(rendered)
         elif kind == "marker":
             parts.append(f"<!-- {block[1]} -->")
-    return _normalize_markdown_text("\n\n".join(parts)).strip()
+    return normalize_markdown_text("\n\n".join(parts)).strip()
 
 
 def _render_blocks_plain(blocks: list[tuple]) -> str:
@@ -95,7 +90,7 @@ def _render_blocks_plain(blocks: list[tuple]) -> str:
             parts.append(block[1])
         elif kind == "table":
             parts.extend(" ".join(str(cell) for cell in row if cell) for row in block[1])
-    return _normalize_markdown_text("\n".join(part for part in parts if part.strip())).strip()
+    return normalize_markdown_text("\n".join(part for part in parts if part.strip())).strip()
 
 
 def _clean_inline(text: str) -> str:
@@ -351,7 +346,7 @@ class _HtmlToBlocks(HTMLParser):
 
 def _html_blocks(path: Path) -> list[tuple]:
     parser = _HtmlToBlocks()
-    parser.feed(_read_text_with_fallback(path))
+    parser.feed(read_text_with_fallback(path))
     parser.close()
     return parser.blocks
 
@@ -400,14 +395,14 @@ def _render_data(value: object, depth: int = 0) -> list[str]:
             elif _is_table_like(item):
                 lines.append(f"{indent}- **{key}:**")
                 lines.append("")
-                lines.append(_rows_to_markdown(_data_table_rows(item)))
+                lines.append(rows_to_markdown(_data_table_rows(item)))
                 lines.append("")
             else:
                 lines.append(f"{indent}- **{key}:**")
                 lines.extend(_render_data(item, depth + 1))
     elif isinstance(value, list):
         if _is_table_like(value):
-            lines.append(_rows_to_markdown(_data_table_rows(value)))
+            lines.append(rows_to_markdown(_data_table_rows(value)))
         else:
             for item in value:
                 if _is_scalar(item):
@@ -424,7 +419,7 @@ def _render_data(value: object, depth: int = 0) -> list[str]:
 
 
 def render_data_markdown(value: object) -> str:
-    return _normalize_markdown_text("\n".join(_render_data(value))).strip()
+    return normalize_markdown_text("\n".join(_render_data(value))).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +473,7 @@ class CsvParserAdapter(ParserAdapter):
     def parse(self, source: DocumentSource, config: WorkflowConfig) -> list[ParseCandidate]:
         if source.path.suffix.lower() != ".csv" and source.media_type != "text/csv":
             return []
-        text = _read_text_with_fallback(source.path)
+        text = read_text_with_fallback(source.path)
         if not text.strip():
             return []
         try:
@@ -486,7 +481,7 @@ class CsvParserAdapter(ParserAdapter):
         except csv.Error:
             dialect = csv.excel
         rows = [row for row in csv.reader(io.StringIO(text), dialect) if any(cell.strip() for cell in row)]
-        markdown = _rows_to_markdown(rows)
+        markdown = rows_to_markdown(rows)
         if not markdown:
             return []
         return [
@@ -547,7 +542,7 @@ class DataParserAdapter(ParserAdapter):
             data_format = "yaml"
         else:
             return []
-        text = _read_text_with_fallback(source.path)
+        text = read_text_with_fallback(source.path)
         try:
             value = json.loads(text) if data_format == "json" else yaml.safe_load(text)
         except Exception:  # noqa: BLE001 - malformed documents use the raw-text fallback

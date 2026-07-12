@@ -303,6 +303,19 @@ def test_data_adapter_falls_back_on_invalid_json(tmp_path: Path) -> None:
     assert DataParserAdapter().parse(_source(json_path, "application/json"), WorkflowConfig()) == []
 
 
+def test_text_fallback_reads_cp949_txt(tmp_path: Path) -> None:
+    """레거시 완성형 .txt가 text-fallback에서 죽어 전체 파서 실패로 이어지던 버그의 회귀 테스트."""
+    from parsing_agent.parsers import LocalTextParserAdapter
+
+    txt_path = tmp_path / "legacy.txt"
+    txt_path.write_bytes("제4장 지역개황\n".encode("cp949"))
+
+    candidates = LocalTextParserAdapter().parse(_source(txt_path, "text/plain"), WorkflowConfig())
+
+    assert len(candidates) == 1
+    assert "제4장 지역개황" in candidates[0].content
+
+
 # ---------------------------------------------------------------------------
 # 라우팅 & 인제스천 연결
 # ---------------------------------------------------------------------------

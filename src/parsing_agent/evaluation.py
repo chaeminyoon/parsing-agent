@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from parsing_agent.config import WorkflowConfig, WorkflowWeights
+from parsing_agent.filetype import is_pdf_source as _is_pdf_source
 from parsing_agent.interfaces import CandidateEvaluator, CandidateJudge
 from parsing_agent.table_metrics import calculate_table_cell_similarity, extract_pdf_table_grids
 from parsing_agent.models import (
@@ -225,10 +226,6 @@ def calculate_table_preservation(source_text: str, candidate_text: str) -> float
     source_tables = _count_structural_lines(source_text)["table"]
     candidate_tables = _count_structural_lines(candidate_text)["table"]
     return _count_similarity(source_tables, candidate_tables)
-
-
-def _is_pdf_source(source: DocumentSource) -> bool:
-    return source.media_type == "application/pdf" or source.path.suffix.lower() == ".pdf"
 
 
 def _extract_pdf_structure_cues(text: str) -> Counter[str]:
