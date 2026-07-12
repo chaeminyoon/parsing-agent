@@ -144,7 +144,7 @@ graph TB
 | 기본 파서 | opendataloader-pdf | Java 기반. 파서 어댑터 레지스트리 뒤에 있어서 다른 파서로 교체하거나 추가할 수 있다 |
 | OCR | Surya (subprocess) | 스캔 페이지용. 실패해도 파이프라인은 계속 간다 (fail-open) |
 | 트레이싱 | LangSmith | 노드 입출력을 구조화 요약으로만 내보낸다. 문서 원문은 트레이스에 나가지 않는다 |
-| 테스트/패키징 | pytest, uv, GitHub Actions | 240개 테스트가 1초 안에 돈다. 전부 모킹 기반이라 API 키 없이 CI에서 돈다 |
+| 테스트/패키징 | pytest, uv, GitHub Actions | 236개 테스트가 1초 안에 돈다. 전부 모킹 기반이라 API 키 없이 CI에서 돈다 |
 
 openai SDK 대신 urllib를 직접 쓰는 건 의도한 선택이다. 재시도 정책과 비용 계측을 호출 지점 한 곳(`_call_with_retry`)에서 통제하고 싶었고, SDK 버전 업그레이드에 끌려다니고 싶지 않았다. LangGraph를 쓴 이유는 반대로 직접 만들기 싫어서다. 조건부 엣지와 상태 병합을 손으로 짜면 그게 또 하나의 버그 표면이 된다.
 
@@ -210,7 +210,7 @@ src/parsing_agent/
 
 benchmarks/            # 외부 파서 head-to-head
 golden/                # 사람 라벨 골든셋 (라벨링 가이드, 상관 분석)
-tests/                 # 240 tests
+tests/                 # 236 tests
 ```
 
 ## 로드맵

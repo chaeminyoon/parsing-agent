@@ -1249,8 +1249,6 @@ class WorkflowRunner:
             "ocr_output_text_characters": ocr_metadata.get("output_text_characters"),
             "trace_payload_policy": "summary_only",
             "parser_names": list(self._config.parser_names),
-            "triage_enabled": self._config.triage_enabled,
-            "triage_sample_pages": self._config.triage_sample_pages,
             "max_repair_rounds": self._config.max_repair_rounds,
             "repair_fanout_enabled": self._config.repair_fanout_enabled,
             "judge_multimodal_grounding_enabled": self._config.judge_multimodal_grounding_enabled,

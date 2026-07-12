@@ -44,7 +44,6 @@ def append_judge_feedback_record(config: WorkflowConfig, result: WorkflowResult)
         "issues": [] if result.metrics.judge_result is None else list(result.metrics.judge_result.issues),
         "notes": list(result.metrics.notes),
         "repair_routes": [action.route_name for action in result.repairs if action.route_name is not None],
-        "triage": result.report.get("triage"),
     }
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")

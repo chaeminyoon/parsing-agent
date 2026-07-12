@@ -22,14 +22,6 @@ class WorkflowWeights:
 @dataclass(slots=True)
 class WorkflowConfig:
     parser_names: list[str] = field(default_factory=lambda: ["opendataloader-pdf", "layout-first-pdf", "text-fallback"])
-    pdf_parser_roles: dict[str, str] = field(
-        default_factory=lambda: {
-            "opendataloader-pdf": "primary",
-            "layout-first-pdf": "support",
-        }
-    )
-    triage_enabled: bool = field(default_factory=lambda: _env_flag("PARSING_AGENT_TRIAGE_ENABLED", True))
-    triage_sample_pages: int = field(default_factory=lambda: int(os.getenv("PARSING_AGENT_TRIAGE_SAMPLE_PAGES", "2")))
     ocr_enabled: bool = field(default_factory=lambda: _env_flag("PARSING_AGENT_OCR_ENABLED", False))
     ocr_provider: str = field(default_factory=lambda: os.getenv("PARSING_AGENT_OCR_PROVIDER", "surya"))
     ocr_min_text_characters: int = field(
