@@ -1211,6 +1211,12 @@ def identify_repair_targets(
     잡힌 표 이슈는 항상 visual repair target으로 변환된다. route 노드는
     이 목록을 보고 heuristic 수리와 이미지 기반 수리를 나눈다.
     """
+    # 그리드 심판(TEDS-lite)이 표가 이미 건강하다고 판정하면 비전 수리
+    # 태스크를 만들지 않는다 — 실측: 표셀 0.849 문서에 비전 2회 호출, 이득 0.
+    # (라벨 휴리스틱이 흘린 table_issues가 비싼 비전 콜로 새는 것을 차단.)
+    skip_visual_table_targets = (
+        metrics.table_cell_similarity is not None and metrics.table_cell_similarity >= 0.8
+    )
     issues_by_type = _metric_issue_by_type(metrics)
     targets = [
         _target_from_directive(
@@ -1221,7 +1227,7 @@ def identify_repair_targets(
         for directive in _classify_repair_directives(source, candidate, metrics)
     ]
     covered_table_issue_types: set[str] = set()
-    for finding in _structured_table_findings(metrics):
+    for finding in _structured_table_findings(metrics) if not skip_visual_table_targets else []:
         issue_type = str(finding["issue_type"])
         targets.append(
             _target_from_table_finding(
@@ -1238,7 +1244,8 @@ def identify_repair_targets(
         covered_table_issue_types.add(issue_type)
     table_regions = candidate.metadata.get("table_regions")
     if (
-        not covered_table_issue_types
+        not skip_visual_table_targets
+        and not covered_table_issue_types
         and isinstance(table_regions, list)
         and metrics.table_issues
     ):
@@ -1277,7 +1284,7 @@ def identify_repair_targets(
             )
             covered_table_issue_types.add(primary_issue_type)
     for issue_type in metrics.table_issues:
-        if issue_type in covered_table_issue_types:
+        if skip_visual_table_targets or issue_type in covered_table_issue_types:
             continue
         targets.append(
             _target_from_table_finding(

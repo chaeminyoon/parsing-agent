@@ -238,3 +238,21 @@ def test_alternate_parser_names_exclude_current() -> None:
     assert "opendataloader-pdf" not in _alternate_parser_names("opendataloader-pdf")
     assert "docling-pdf" in _alternate_parser_names("opendataloader-pdf")
     assert set(_alternate_parser_names("docling-pdf")) == {"opendataloader-pdf", "layout-first-pdf"}
+
+
+def test_visual_repair_targets_skipped_when_grid_judge_says_tables_are_healthy(tmp_path: Path) -> None:
+    """표셀 0.849 문서에 비전 2회·이득 0이던 실측의 회귀 가드 — TEDS 게이트."""
+    from parsing_agent.repair import identify_repair_targets
+
+    source = _pdf_source(tmp_path, "원문")
+    candidate = ParseCandidate(parser_name="opendataloader-pdf", content="후보", format_name="md")
+    healthy = _metrics(coverage=1.0, table=0.5, cell=0.85)  # 라벨 점수는 낮지만 그리드는 건강
+    healthy.table_issues = ["missing_header"]
+
+    routes = {t.route_name for t in identify_repair_targets(source, candidate, healthy)}
+    assert "recover_tables_from_pdf_image" not in routes
+
+    broken = _metrics(coverage=1.0, table=0.5, cell=0.4)
+    broken.table_issues = ["missing_header"]
+    routes_broken = {t.route_name for t in identify_repair_targets(source, candidate, broken)}
+    assert "recover_tables_from_pdf_image" in routes_broken
