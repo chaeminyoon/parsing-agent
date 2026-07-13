@@ -1,8 +1,8 @@
 """골든셋 라벨링 도구 — 원본 PDF와 파싱 결과를 나란히 놓고 클릭으로 라벨링한다.
 
 사용:
-    uv run python golden/labeling_tool.py "/Volumes/T7/1. 논문정리/golden-labeling"
-    → http://127.0.0.1:8500 접속
+    python3 labeling_tool.py [워크스페이스경로] [포트]
+    → http://127.0.0.1:8500 접속 (포트 생략 시 8500 — 워크스페이스 여러 개면 포트를 달리)
 
 워크스페이스 구조(준비 스크립트가 만든 그대로):
     originals/<문서>.pdf   parsed/<문서>/<문서>.md   labels/<문서>.json
@@ -63,7 +63,11 @@ _PAGE = """<!doctype html>
   <div id="docs"></div>
 </div>
 <div id="main">
-  <embed id="pdf" type="application/pdf" src="">
+  <embed id="pdf" src="">
+  <div id="native-holder" style="display:none;flex:1;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:#f1f5f9;">
+    <div style="color:#475569;font-size:14px;">이 포맷은 브라우저 미리보기가 없습니다</div>
+    <button style="padding:10px 20px;border:none;border-radius:8px;background:#3b82f6;color:white;font-size:14px;cursor:pointer;">네이티브 앱으로 원본 열기</button>
+  </div>
   <div id="right">
     <div id="md"></div>
     <div id="form">
@@ -139,9 +143,20 @@ async function loadDocs() {
   });
   document.getElementById("progress").textContent = `완료 ${done} / ${docs.length}`;
 }
+const OFFICE_EXTS = [".docx", ".pptx", ".xlsx", ".odt"];
 async function openDoc(name) {
   current = name;
-  document.getElementById("pdf").src = `/original/${encodeURIComponent(name)}.pdf`;
+  const doc = docs.find(d => d.name === name);
+  const viewer = document.getElementById("pdf");
+  const holder = document.getElementById("native-holder");
+  if (doc && OFFICE_EXTS.includes(doc.ext)) {
+    viewer.style.display = "none"; holder.style.display = "flex";
+    holder.querySelector("button").onclick = () =>
+      fetch(`/api/open/${encodeURIComponent(doc.file)}`, {method: "POST"});
+  } else {
+    holder.style.display = "none"; viewer.style.display = "block";
+    viewer.src = `/original/${encodeURIComponent(doc ? doc.file : name + ".pdf")}`;
+  }
   const md = await (await fetch(`/api/md/${encodeURIComponent(name)}`)).text();
   document.getElementById("md").innerHTML = mdToHtml(md);
   const label = await (await fetch(`/api/label/${encodeURIComponent(name)}`)).json();
@@ -176,10 +191,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _original_files(self) -> dict[str, str]:
+        """stem → 원본 파일명. PDF뿐 아니라 모든 포맷을 지원한다."""
+        files: dict[str, str] = {}
+        for p in sorted((self.workspace / "originals").iterdir()):
+            if p.is_file() and not p.name.startswith(("._", ".")):
+                files.setdefault(p.stem, p.name)
+        return files
+
     def _doc_names(self) -> list[str]:
-        return sorted(
-            p.stem for p in (self.workspace / "originals").glob("*.pdf") if not p.name.startswith("._")
-        )
+        return sorted(self._original_files())
+
+    def _parsed_md(self, name: str):
+        """parsed/<name>/<name>.md (골든 배치)와 parsed/<name>.md (평면) 둘 다 지원."""
+        nested = self.workspace / "parsed" / name / f"{name}.md"
+        flat = self.workspace / "parsed" / f"{name}.md"
+        return nested if nested.exists() else flat
 
     def _label_path(self, name: str) -> Path:
         return self.workspace / "labels" / f"{name}.json"
@@ -190,25 +217,39 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, _PAGE.encode(), "text/html; charset=utf-8")
         elif path == "/api/docs":
             docs = []
+            originals = self._original_files()
             for name in self._doc_names():
-                md = self.workspace / "parsed" / name / f"{name}.md"
+                md = self._parsed_md(name)
                 labeled = False
                 label_path = self._label_path(name)
                 if label_path.exists():
                     rating = json.loads(label_path.read_text(encoding="utf-8"))["ratings"][0]
                     labeled = all(rating.get(f, -1) >= 1 for f in (
                         "overall_quality", "text_coverage", "table_correctness", "structure_preservation"))
-                docs.append({"name": name, "has_md": md.exists(), "labeled": labeled})
+                docs.append({
+                    "name": name,
+                    "file": originals[name],
+                    "ext": Path(originals[name]).suffix.lower(),
+                    "has_md": md.exists(),
+                    "labeled": labeled,
+                })
             self._send(200, json.dumps(docs, ensure_ascii=False).encode(), "application/json")
         elif path.startswith("/original/"):
-            pdf = self.workspace / "originals" / path.removeprefix("/original/")
-            if pdf.exists() and pdf.suffix == ".pdf":
-                self._send(200, pdf.read_bytes(), "application/pdf")
-            else:
+            original = self.workspace / "originals" / Path(path.removeprefix("/original/")).name
+            if not original.exists():
                 self._send(404, b"not found", "text/plain")
+                return
+            suffix = original.suffix.lower()
+            if suffix == ".pdf":
+                ctype = "application/pdf"
+            elif suffix in (".html", ".htm"):
+                ctype = "text/html; charset=utf-8"
+            else:
+                ctype = "text/plain; charset=utf-8"
+            self._send(200, original.read_bytes(), ctype)
         elif path.startswith("/api/md/"):
             name = path.removeprefix("/api/md/")
-            md = self.workspace / "parsed" / name / f"{name}.md"
+            md = self._parsed_md(name)
             body = md.read_text(encoding="utf-8") if md.exists() else "(아직 파싱 결과가 없습니다)"
             self._send(200, body.encode(), "text/plain; charset=utf-8")
         elif path.startswith("/api/label/"):
@@ -222,6 +263,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - http.server 규약
         path = unquote(self.path)
+        if path.startswith("/api/open/"):
+            # 브라우저가 렌더 못 하는 포맷(docx/pptx/xlsx)을 네이티브 앱으로 연다 (macOS).
+            import subprocess
+            import sys as _sys
+
+            original = self.workspace / "originals" / Path(path.removeprefix("/api/open/")).name
+            if original.exists() and _sys.platform == "darwin":
+                subprocess.run(["open", str(original)], check=False)
+                self._send(200, b"ok", "text/plain")
+            else:
+                self._send(404, b"cannot open", "text/plain")
+            return
         if not path.startswith("/api/save/"):
             self._send(404, b"not found", "text/plain")
             return
@@ -250,13 +303,14 @@ def main() -> int:
     # 인자가 없으면 이 스크립트가 놓인 폴더를 워크스페이스로 쓴다
     # (워크스페이스에 복사해 두면 `python3 labeling_tool.py`만으로 실행).
     workspace = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else Path(__file__).resolve().parent
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else PORT
     for required in ("originals", "labels"):
         if not (workspace / required).is_dir():
             print(f"워크스페이스가 아닙니다: {workspace} ({required}/ 없음)")
             return 1
     Handler.workspace = workspace
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"라벨링 도구: http://127.0.0.1:{PORT}  (중지: Ctrl+C)")
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    print(f"라벨링 도구: http://127.0.0.1:{port}  (중지: Ctrl+C)")
     server.serve_forever()
     return 0
 
