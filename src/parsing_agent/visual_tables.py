@@ -862,3 +862,80 @@ def merge_split_tables(content: str) -> str:
             result.extend(deferred_markers)
     # 병합이 없었으면 원본을 그대로 돌려준다 (끝 개행 등 무의미한 차이 방지).
     return "\n".join(result) if merged_any else content
+
+
+# ---------------------------------------------------------------------------
+# 평문 표 잔재 제거 (P3 실측: 융합이 표를 삽입해도 원문 추출 텍스트의 표 내용이
+# 한 줄 평문으로 남아 중복된다 — 사람 눈에 즉시 띄는 노이즈)
+# ---------------------------------------------------------------------------
+
+# 평문 줄의 공백 구분 청크가 이 비율 이상 표 셀 텍스트에 포함되면 잔재로 본다.
+_REMNANT_CHUNK_COVERAGE = 0.9
+_REMNANT_MIN_CHUNKS = 6
+# 표 블록에서 이 줄 수 안의 평문만 검사한다 (멀리 있는 본문 오인 방지).
+_REMNANT_WINDOW = 2
+
+
+def _compact(text: str) -> str:
+    return "".join(text.split()).lower()
+
+
+def remove_plain_table_remnants(content: str) -> str:
+    """마크다운 표 바로 위·아래의 '표 내용 평문 덤프' 줄을 제거한다.
+
+    잔재와 셀은 공백이 어긋나는 경우가 많아("센서 교체" vs "센서교체")
+    토큰 매칭 대신 압축 문자열 포함으로 판정한다. 캡션(표 N…)·헤딩·페이지
+    마커는 보호하고, 제거가 없으면 원본을 그대로 반환한다.
+    """
+    lines = content.splitlines()
+
+    # 표 블록별 셀 압축 문자열
+    blocks: list[tuple[int, int, str]] = []  # (start, end, compact cells)
+    start = None
+    for index in range(len(lines) + 1):
+        line = lines[index].strip() if index < len(lines) else ""
+        is_row = line.startswith("|") and line.endswith("|")
+        if is_row and start is None:
+            start = index
+        elif not is_row and start is not None:
+            cells = []
+            for row_line in lines[start:index]:
+                if _is_separator_row(row_line):
+                    continue
+                cells.extend(_split_table_cells(row_line))
+            blocks.append((start, index - 1, _compact(" ".join(cells))))
+            start = None
+
+    def is_remnant(line: str, cell_compact: str) -> bool:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("|"):
+            return False
+        if _MERGE_PAGE_MARKER_RE.match(stripped) or _TABLE_CAPTION_RE.match(stripped):
+            return False
+        chunks = stripped.split()
+        if len(chunks) < _REMNANT_MIN_CHUNKS:
+            return False
+        matched = sum(1 for chunk in chunks if _compact(chunk) in cell_compact)
+        return matched / len(chunks) >= _REMNANT_CHUNK_COVERAGE
+
+    to_remove: set[int] = set()
+    for block_start, block_end, cell_compact in blocks:
+        if not cell_compact:
+            continue
+        for direction, edge in ((-1, block_start), (1, block_end)):
+            probe = edge + direction
+            seen = 0
+            while 0 <= probe < len(lines) and seen < _REMNANT_WINDOW:
+                if not lines[probe].strip():
+                    probe += direction
+                    continue
+                seen += 1
+                if is_remnant(lines[probe], cell_compact):
+                    to_remove.add(probe)
+                    probe += direction
+                    continue
+                break
+
+    if not to_remove:
+        return content
+    return "\n".join(line for index, line in enumerate(lines) if index not in to_remove)

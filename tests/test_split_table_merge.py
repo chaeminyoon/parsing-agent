@@ -72,3 +72,59 @@ def test_post_loop_normalization_merges_split_tables() -> None:
 
     assert "merge_split_multipage_tables" in applied
     assert normalized.count("| --- | --- |") == 1
+
+
+# ---------------------------------------------------------------------------
+# 평문 표 잔재 제거
+# ---------------------------------------------------------------------------
+
+
+def test_removes_plain_dump_of_table_content_above_table() -> None:
+    """P3 실측(borderless): 삽입된 표 위에 남은 원문 평문 덤프 제거."""
+    from parsing_agent.visual_tables import remove_plain_table_remnants
+
+    content = (
+        "관측소 관측일수 결측률 비고 덕적도 361 1.1% 정상 칠발도 349 4.4% 센서 교체\n\n"
+        "| 관측소 | 관측일수 | 결측률 | 비고 |\n| --- | --- | --- | --- |\n"
+        "| 덕적도 | 361 | 1.1% | 정상 |\n| 칠발도 | 349 | 4.4% | 센서교체 |"
+    )
+
+    cleaned = remove_plain_table_remnants(content)
+
+    assert "관측소 관측일수" not in cleaned.splitlines()[0]  # 잔재 제거
+    assert "| 덕적도 | 361 | 1.1% | 정상 |" in cleaned      # 표는 보존
+    # 공백 어긋남("센서 교체" vs "센서교체")도 압축 매칭으로 잡힌다
+    assert "센서 교체" not in cleaned
+
+
+def test_keeps_captions_and_unrelated_text() -> None:
+    from parsing_agent.visual_tables import remove_plain_table_remnants
+
+    content = (
+        "표 4.2-1 관측소별 실적 현황 요약본이다\n\n"
+        "| 관측소 | 관측일수 |\n| --- | --- |\n| 덕적도 | 361 |\n\n"
+        "다음 장에서는 결측 원인을 상세히 분석한다. 관측 체계의 한계와 개선 방향을 다룬다."
+    )
+
+    assert remove_plain_table_remnants(content) == content  # 캡션·본문 보존
+
+
+def test_removes_remnant_below_table_too() -> None:
+    from parsing_agent.visual_tables import remove_plain_table_remnants
+
+    content = (
+        "| 관측소 | 관측일수 | 결측률 |\n| --- | --- | --- |\n| 덕적도 | 361 | 1.1% |\n"
+        "| 칠발도 | 349 | 4.4% |\n\n"
+        "관측소 관측일수 결측률 덕적도 361 1.1% 칠발도 349 4.4%"
+    )
+
+    cleaned = remove_plain_table_remnants(content)
+
+    assert cleaned.rstrip().endswith("| 칠발도 | 349 | 4.4% |")
+
+
+def test_no_remnant_returns_original_verbatim() -> None:
+    from parsing_agent.visual_tables import remove_plain_table_remnants
+
+    content = "표 없는 본문이다.\n"
+    assert remove_plain_table_remnants(content) is content

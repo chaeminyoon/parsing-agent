@@ -8,7 +8,7 @@ from typing import Any
 from parsing_agent.filetype import is_pdf
 from parsing_agent.fusion import fuse_missing_body_lines, fuse_tables_from_alternate
 from parsing_agent.toc import restore_headings_from_toc
-from parsing_agent.visual_tables import merge_split_tables
+from parsing_agent.visual_tables import merge_split_tables, remove_plain_table_remnants
 from parsing_agent.interfaces import CandidateRepairer
 from parsing_agent.models import DocumentSource, EvaluationIssue, EvaluationMetrics, ParseCandidate, RepairAction
 from parsing_agent.visual_repair import (
@@ -676,6 +676,11 @@ def apply_table_normalizations(text: str) -> tuple[str, list[str]]:
     if merged != text:
         text = merged
         applied.append("merge_split_multipage_tables")
+    # 표 내용의 평문 덤프 잔재 제거 (P3 실측: 융합 삽입 표 위의 중복 한 줄).
+    cleaned = remove_plain_table_remnants(text)
+    if cleaned != text:
+        text = cleaned
+        applied.append("remove_plain_table_remnants")
     return text, applied
 
 
