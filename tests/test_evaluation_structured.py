@@ -240,3 +240,58 @@ def test_pdf_similarity_is_not_penalized_by_table_markup(tmp_path: Path) -> None
 
     assert on.normalized_similarity > 0.9   # 장식 제거 후엔 사실상 동일 콘텐츠
     assert on.normalized_similarity > off.normalized_similarity
+
+
+def test_high_image_ratio_adds_low_confidence_note(tmp_path: Path) -> None:
+    """골든 파일럿: 그림표 문서에서 coverage가 맹목적으로 1.0이 되는 맹점의 고지."""
+    pdf_path = tmp_path / "figures.pdf"
+    pdf_path.write_bytes(b"%PDF-FAKE")
+    source = DocumentSource(
+        path=pdf_path, media_type="application/pdf", size_bytes=0, run_id="img",
+        extracted_text="본문", page_count=1, diagnostics={"image_area_ratio": 0.42},
+    )
+    dense = DocumentSource(
+        path=pdf_path, media_type="application/pdf", size_bytes=0, run_id="img-dense",
+        extracted_text="본문", page_count=40,
+        diagnostics={"image_area_ratio": 0.06, "image_block_count": 300, "sampled_pages": 40},
+    )
+
+    metrics = DeterministicEvaluator(config=WorkflowConfig(judge_weight=0)).evaluate(
+        source, _candidate("본문")
+    )
+
+    assert any("Low-confidence coverage" in note for note in metrics.notes)
+
+    # 면적은 작아도 이미지 블록 밀도가 높으면(도판 위주) 플래그 (실측: kiost_marine)
+    metrics_dense = DeterministicEvaluator(config=WorkflowConfig(judge_weight=0)).evaluate(
+        dense, _candidate("본문")
+    )
+    assert any("Low-confidence coverage" in note for note in metrics_dense.notes)
+
+    plain = DocumentSource(
+        path=pdf_path, media_type="application/pdf", size_bytes=0, run_id="img2",
+        extracted_text="본문", page_count=1, diagnostics={"image_area_ratio": 0.05},
+    )
+    metrics_plain = DeterministicEvaluator(config=WorkflowConfig(judge_weight=0)).evaluate(
+        plain, _candidate("본문")
+    )
+    assert not any("Low-confidence coverage" in note for note in metrics_plain.notes)
+
+
+def test_estimate_pdf_image_ratio_on_real_pdf(tmp_path: Path) -> None:
+    import fitz
+
+    from parsing_agent.ingestion import estimate_pdf_image_ratio
+
+    pdf_path = tmp_path / "half_image.pdf"
+    document = fitz.open()
+    page = document.new_page(width=400, height=400)
+    pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 60, 60))
+    pixmap.set_rect(pixmap.irect, (200, 120, 80))
+    page.insert_image(fitz.Rect(0, 0, 400, 200), pixmap=pixmap)  # 페이지의 절반
+    document.save(pdf_path)
+
+    diagnostics = estimate_pdf_image_ratio(pdf_path)
+
+    assert diagnostics["image_block_count"] == 1
+    assert 0.4 <= diagnostics["image_area_ratio"] <= 0.6

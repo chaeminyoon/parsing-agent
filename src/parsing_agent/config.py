@@ -95,6 +95,11 @@ class WorkflowConfig:
     structured_content_evaluation_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_STRUCTURED_CONTENT_EVALUATION_ENABLED", True)
     )
+    # 이미지 면적 비율이 이 값 이상이면 coverage를 저신뢰로 고지한다.
+    # (벡터 다이어그램은 괘선 표와 기하로 구분되지 않아 이 신호에서 제외 — 골든 실측)
+    image_content_flag_ratio: float = field(
+        default_factory=lambda: float(os.getenv("PARSING_AGENT_IMAGE_CONTENT_FLAG_RATIO", "0.2"))
+    )
     # PDF 북마크(TOC) 제목 보존율을 구조 점수의 하한으로 쓴다.
     toc_structure_metric_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_TOC_STRUCTURE_METRIC_ENABLED", True)

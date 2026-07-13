@@ -100,6 +100,8 @@ def build_document_source(
         if ocr_result.applied and ocr_result.text:
             extracted_text = ocr_result.text
 
+    diagnostics = estimate_pdf_image_ratio(resolved) if is_pdf(media_type, resolved) else {}
+
     return DocumentSource(
         path=resolved,
         media_type=media_type,
@@ -109,4 +111,44 @@ def build_document_source(
         page_count=page_count,
         ocr_metadata=ocr_metadata,
         ocr_artifacts=ocr_artifacts,
+        diagnostics=diagnostics,
     )
+
+
+# 이 비율 이상이 이미지 영역이면 coverage/추출 결과를 저신뢰로 고지한다.
+# (coverage의 기준인 추출 텍스트에는 이미지 속 텍스트·그림표가 아예 없다 —
+#  골든 파일럿에서 사람 라벨이 확정한 맹점.)
+_IMAGE_DIAGNOSTIC_MAX_PAGES = 40
+
+
+def estimate_pdf_image_ratio(path: Path, max_pages: int = _IMAGE_DIAGNOSTIC_MAX_PAGES) -> dict:
+    """PDF의 이미지 블록 면적 비율과 개수를 표본 추정한다. 실패 시 빈 dict."""
+    try:
+        import fitz
+
+        with fitz.open(path) as document:
+            page_total = min(document.page_count, max_pages)
+            total_area = 0.0
+            image_area = 0.0
+            image_blocks = 0
+            for index in range(page_total):
+                page = document.load_page(index)
+                total_area += float(page.rect.get_area())
+                try:
+                    blocks = page.get_text("dict").get("blocks", [])
+                except Exception:  # noqa: BLE001 - 페이지 하나의 실패는 건너뛴다
+                    continue
+                for block in blocks:
+                    if block.get("type") == 1:  # image block
+                        x0, y0, x1, y1 = block.get("bbox", (0, 0, 0, 0))
+                        image_area += max(0.0, (x1 - x0)) * max(0.0, (y1 - y0))
+                        image_blocks += 1
+            if total_area <= 0:
+                return {}
+            return {
+                "image_area_ratio": round(min(image_area / total_area, 1.0), 4),
+                "image_block_count": image_blocks,
+                "sampled_pages": page_total,
+            }
+    except Exception:  # noqa: BLE001 - 진단 실패가 인제스천을 막으면 안 된다
+        return {}

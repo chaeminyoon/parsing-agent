@@ -30,6 +30,9 @@ class DocumentSource:
     page_count: int | None = None
     ocr_metadata: dict[str, Any] = field(default_factory=dict)
     ocr_artifacts: dict[str, str] = field(default_factory=dict)
+    # 소스 자체의 진단 정보 (예: PDF 이미지 면적 비율) — 평가가 자기 한계를
+    # 고지하는 데 쓴다. 골든 파일럿: 이미지 속 텍스트는 coverage 기준에 없다.
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

@@ -1108,6 +1108,22 @@ class DeterministicEvaluator(CandidateEvaluator):
                 )
             except Exception:  # noqa: BLE001 - 진단 메트릭 실패가 평가를 막으면 안 된다
                 metrics.table_cell_similarity = None
+        diagnostics = source.diagnostics or {}
+        image_ratio = diagnostics.get("image_area_ratio")
+        sampled_pages = max(int(diagnostics.get("sampled_pages") or 0), 1)
+        blocks_per_page = (diagnostics.get("image_block_count") or 0) / sampled_pages
+        # 5블록/페이지 이상은 도판 위주 문서다 (골든 실측: 사람이 지적한
+        # kiost_marine 30.6/p vs 나머지 ≤3.1/p — 면적이 작아도 신호가 된다).
+        if image_ratio is not None and (
+            image_ratio >= getattr(self._config, "image_content_flag_ratio", 0.2)
+            or blocks_per_page >= 5
+        ):
+            # coverage의 기준 텍스트에는 이미지 속 텍스트·그림표가 없다 —
+            # 이미지 비중이 높으면 커버리지·총점이 과대평가될 수 있음을 고지.
+            metrics.notes.append(
+                f"Low-confidence coverage: {image_ratio:.0%} of the page area is image content "
+                "that the extraction baseline cannot see (figures/圖-tables may be missing silently)."
+            )
         metrics.notes.extend(_build_notes(metrics))
         if table_structure_consistency < 0.9:
             metrics.notes.append(
