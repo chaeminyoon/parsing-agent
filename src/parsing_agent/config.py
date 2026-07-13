@@ -95,6 +95,10 @@ class WorkflowConfig:
     structured_content_evaluation_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_STRUCTURED_CONTENT_EVALUATION_ENABLED", True)
     )
+    # PDF 북마크(TOC) 제목 보존율을 구조 점수의 하한으로 쓴다.
+    toc_structure_metric_enabled: bool = field(
+        default_factory=lambda: _env_flag("PARSING_AGENT_TOC_STRUCTURE_METRIC_ENABLED", True)
+    )
     # PDF 유사도를 마크다운 장식 제거 후 비교한다 — 표가 좋아질수록 문자열
     # 유사도가 나빠지는 역설(실측: 표 셀 0.44→0.85 개선에 sim 0.76→0.46 추락) 방지.
     pdf_content_similarity_enabled: bool = field(

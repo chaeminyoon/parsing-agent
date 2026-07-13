@@ -1160,6 +1160,13 @@ class DeterministicEvaluator(CandidateEvaluator):
                     table_issues=metrics.table_issues,
                 )
             )
+        if _is_pdf_source(source) and getattr(self._config, "toc_structure_metric_enabled", True):
+            from parsing_agent.toc import read_pdf_toc, toc_title_coverage
+
+            toc_coverage = toc_title_coverage(read_pdf_toc(source.path), candidate_text)
+            if toc_coverage is not None:
+                # 문서가 선언한 목차가 살아남은 비율은 정규식 cue보다 강한 근거다.
+                metrics.structure_retention = max(metrics.structure_retention, toc_coverage)
         if (
             _is_pdf_source(source)
             and metrics.table_cell_similarity is not None

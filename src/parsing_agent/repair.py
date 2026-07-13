@@ -7,6 +7,7 @@ from typing import Any
 
 from parsing_agent.filetype import is_pdf
 from parsing_agent.fusion import fuse_missing_body_lines, fuse_tables_from_alternate
+from parsing_agent.toc import restore_headings_from_toc
 from parsing_agent.interfaces import CandidateRepairer
 from parsing_agent.models import DocumentSource, EvaluationIssue, EvaluationMetrics, ParseCandidate, RepairAction
 from parsing_agent.visual_repair import (
@@ -998,6 +999,14 @@ def _classify_repair_directives(
             "reconstruct_table_text_blocks",
             "Reconstruct repeated key/value text rows into a conservative two-column markdown table.",
             _reconstruct_table_text_blocks,
+        )
+    if _is_pdf_candidate(source, candidate) and metrics.structure_retention < 0.75:
+        add_directive(
+            "structure_toc_headings",
+            "restore_headings_from_toc",
+            "restore_headings_from_toc",
+            "Promote or restore section headings using the PDF's own bookmark outline (TOC).",
+            lambda current: restore_headings_from_toc(source, current),
         )
     if metrics.structure_retention < 0.75 or _has_duplicate_headings(content):
         add_directive(
