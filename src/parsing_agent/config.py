@@ -95,6 +95,10 @@ class WorkflowConfig:
     structured_content_evaluation_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_STRUCTURED_CONTENT_EVALUATION_ENABLED", True)
     )
+    # 라벨 없는 PDF에서 표 보존율을 TEDS-lite(괘선 그리드 셀 유사도)로 대체한다.
+    teds_table_fallback_enabled: bool = field(
+        default_factory=lambda: _env_flag("PARSING_AGENT_TEDS_TABLE_FALLBACK_ENABLED", True)
+    )
     table_cell_metric_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_TABLE_CELL_METRIC_ENABLED", True)
     )

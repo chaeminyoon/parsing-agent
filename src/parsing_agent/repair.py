@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from parsing_agent.filetype import is_pdf
+from parsing_agent.fusion import fuse_missing_body_lines, fuse_tables_from_alternate
 from parsing_agent.interfaces import CandidateRepairer
 from parsing_agent.models import DocumentSource, EvaluationIssue, EvaluationMetrics, ParseCandidate, RepairAction
 from parsing_agent.visual_repair import (
@@ -954,6 +955,25 @@ def _classify_repair_directives(
             "recover_missing_table_caption_lines",
             "Recover missing source table or figure captions before table-specific repair runs.",
             lambda current: _recover_missing_table_caption_lines(source, current),
+        )
+    if _is_pdf_candidate(source, candidate) and metrics.text_coverage < 0.9:
+        add_directive(
+            "text_coverage_missing_paragraphs",
+            "fuse_missing_body_from_source",
+            "fuse_missing_body_lines",
+            "Restore source body paragraphs that the parser dropped, anchored to their original position.",
+            lambda current: fuse_missing_body_lines(source, current),
+        )
+    if _is_pdf_candidate(source, candidate) and (
+        (metrics.table_cell_similarity is not None and metrics.table_cell_similarity < 0.7)
+        or metrics.table_preservation < 0.75
+    ):
+        add_directive(
+            "table_cross_parser_fusion",
+            "fuse_tables_from_alternate_parser",
+            "fuse_tables_from_alternate",
+            "Swap in per-table best candidates from the alternate PDF parser, judged by the PDF's own ruled-table grid (TEDS-lite).",
+            lambda current: fuse_tables_from_alternate(source, current, current_parser=candidate.parser_name),
         )
     if metrics.text_coverage < 0.72 and _missing_structured_source_lines(source, content):
         add_directive(

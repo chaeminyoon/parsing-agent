@@ -1155,5 +1155,16 @@ class DeterministicEvaluator(CandidateEvaluator):
                     table_issues=metrics.table_issues,
                 )
             )
+        if (
+            _is_pdf_source(source)
+            and metrics.table_cell_similarity is not None
+            and getattr(self._config, "teds_table_fallback_enabled", True)
+            and not _extract_pdf_table_label_ids(source_text)
+        ):
+            # 라벨 없는 PDF에서 라벨 매칭 표 점수는 장님이다 (실측: 표를 전부
+            # 복구해도 0.016). 골든셋에서 라벨 기반 표 점수는 사람 순위와
+            # 뒤집혔고 셀 단위 메트릭이 그 대체로 채택된 이력이 있으므로,
+            # 라벨이 아예 없는 문서에 한해 TEDS-lite를 표 보존율로 쓴다.
+            metrics.table_preservation = max(metrics.table_preservation, metrics.table_cell_similarity)
         metrics.total_score = aggregate_score(metrics, self._config.weights, self._config.judge_weight)
         return metrics
