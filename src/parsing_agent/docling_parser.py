@@ -10,6 +10,8 @@ docling은 무거운 옵셔널 의존성(`uv sync --extra bench-docling`)이다.
 """
 from __future__ import annotations
 
+import sys
+
 from parsing_agent.config import WorkflowConfig
 from parsing_agent.filetype import is_pdf_source
 from parsing_agent.interfaces import ParserAdapter
@@ -28,10 +30,29 @@ def docling_available() -> bool:
     return DocumentConverter is not None
 
 
+def _pdf_format_options():
+    """macOS에서는 Apple Vision OCR을 쓴다 — 한국어 래스터 그림표 실측에서
+    기본 RapidOCR(중국어 모델)이 전멸("10년"→"10H")한 반면 Vision은 완벽 판독.
+    ocrmac 미설치·비macOS면 None을 반환해 docling 기본으로 우아하게 저하."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ocrmac  # noqa: F401 - 가용성 확인용
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import OcrMacOptions, PdfPipelineOptions
+        from docling.document_converter import PdfFormatOption
+
+        options = PdfPipelineOptions(ocr_options=OcrMacOptions(lang=["ko-KR", "en-US"]))
+        return {InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
+    except Exception:  # noqa: BLE001 - OCR 백엔드 선택 실패는 기본으로 저하
+        return None
+
+
 def _get_converter():
     global _converter
     if _converter is None and DocumentConverter is not None:
-        _converter = DocumentConverter()
+        format_options = _pdf_format_options()
+        _converter = DocumentConverter(format_options=format_options) if format_options else DocumentConverter()
     return _converter
 
 

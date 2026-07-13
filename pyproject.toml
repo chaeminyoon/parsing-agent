@@ -27,6 +27,11 @@ bench = [
 bench-docling = [
     "docling>=2.108.0",
 ]
+# macOS 전용: docling OCR 백엔드로 Apple Vision 사용
+# (한국어 래스터 그림표 실측에서 기본 RapidOCR 대비 압승 — 골든 kocw 케이스)
+mac-ocr = [
+    "ocrmac>=1.0.1",
+]
 
 [project.scripts]
 parsing-agent = "parsing_agent.cli:main"
