@@ -368,3 +368,152 @@ def test_extract_source_text_uses_visible_html_text(tmp_path: Path) -> None:
 
     assert text == "보이는 본문"
     assert page_count is None
+
+
+# ---------------------------------------------------------------------------
+# XLSX / ODT / XML
+# ---------------------------------------------------------------------------
+
+_S_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PKG_R_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_ODF_O = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+_ODF_T = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+_ODF_TB = "urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+
+
+def _write_xlsx(path: Path) -> None:
+    workbook = f"""<?xml version="1.0"?>
+<workbook xmlns="{_S_NS}" xmlns:r="{_R_NS}">
+  <sheets><sheet name="예산" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"""
+    rels = f"""<?xml version="1.0"?>
+<Relationships xmlns="{_PKG_R_NS}">
+  <Relationship Id="rId1" Type="x" Target="worksheets/sheet1.xml"/>
+</Relationships>"""
+    shared = f"""<?xml version="1.0"?>
+<sst xmlns="{_S_NS}"><si><t>항목</t></si><si><t>금액</t></si><si><t>준설</t></si><si><t>호안</t></si></sst>"""
+    sheet = f"""<?xml version="1.0"?>
+<worksheet xmlns="{_S_NS}"><sheetData>
+  <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>
+  <row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>1200</v></c></row>
+  <row r="3"><c r="A3" t="s"><v>3</v></c><c r="B3"><v>850</v></c></row>
+</sheetData></worksheet>"""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("xl/workbook.xml", workbook)
+        archive.writestr("xl/_rels/workbook.xml.rels", rels)
+        archive.writestr("xl/sharedStrings.xml", shared)
+        archive.writestr("xl/worksheets/sheet1.xml", sheet)
+
+
+def _write_odt(path: Path) -> None:
+    content = f"""<?xml version="1.0"?>
+<office:document-content xmlns:office="{_ODF_O}" xmlns:text="{_ODF_T}" xmlns:table="{_ODF_TB}">
+  <office:body><office:text>
+    <text:h text:outline-level="1">사업 개요</text:h>
+    <text:p>본문 문단이다.</text:p>
+    <text:list><text:list-item><text:p>항목 하나</text:p></text:list-item></text:list>
+    <table:table>
+      <table:table-row><table:table-cell><text:p>구분</text:p></table:table-cell><table:table-cell><text:p>값</text:p></table:table-cell></table:table-row>
+      <table:table-row><table:table-cell><text:p>연장</text:p></table:table-cell><table:table-cell><text:p>320</text:p></table:table-cell></table:table-row>
+    </table:table>
+  </office:text></office:body>
+</office:document-content>"""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("content.xml", content)
+
+
+def test_xlsx_adapter_renders_sheets_as_tables(tmp_path: Path) -> None:
+    from parsing_agent.format_parsers import XlsxParserAdapter
+
+    xlsx_path = tmp_path / "budget.xlsx"
+    _write_xlsx(xlsx_path)
+
+    candidates = XlsxParserAdapter().parse(_source(xlsx_path, "application/octet-stream"), WorkflowConfig())
+
+    assert len(candidates) == 1
+    content = candidates[0].content
+    assert "## 예산" in content
+    assert "| 항목 | 금액 |" in content
+    assert "| 준설 | 1200 |" in content
+    assert "| 호안 | 850 |" in content
+    assert candidates[0].metadata["sheet_count"] == 1
+
+
+def test_extract_xlsx_text_feeds_ingestion(tmp_path: Path) -> None:
+    xlsx_path = tmp_path / "budget.xlsx"
+    _write_xlsx(xlsx_path)
+
+    text, page_count = extract_source_text(xlsx_path, "application/octet-stream")
+
+    assert text is not None and "준설" in text and "1200" in text
+    assert page_count is None
+    assert "|" not in text
+
+
+def test_odt_adapter_renders_structure(tmp_path: Path) -> None:
+    from parsing_agent.format_parsers import OdtParserAdapter
+
+    odt_path = tmp_path / "report.odt"
+    _write_odt(odt_path)
+
+    candidates = OdtParserAdapter().parse(_source(odt_path, "application/octet-stream"), WorkflowConfig())
+
+    assert len(candidates) == 1
+    content = candidates[0].content
+    assert "# 사업 개요" in content
+    assert "본문 문단이다." in content
+    assert "- 항목 하나" in content
+    assert "| 구분 | 값 |" in content
+    assert "| 연장 | 320 |" in content
+
+
+def test_xml_adapter_renders_hierarchy_and_repeated_elements_as_table(tmp_path: Path) -> None:
+    from parsing_agent.format_parsers import XmlParserAdapter
+
+    xml_path = tmp_path / "catalog.xml"
+    xml_path.write_text(
+        """<catalog region="남해">
+  <updated>2026-07-12</updated>
+  <station id="46042" depth="2000"/>
+  <station id="46026" depth="52"/>
+  <station id="46013" depth="120"/>
+</catalog>""",
+        encoding="utf-8",
+    )
+
+    candidates = XmlParserAdapter().parse(_source(xml_path, "text/xml"), WorkflowConfig())
+
+    assert len(candidates) == 1
+    content = candidates[0].content
+    assert '**catalog (region="남해"):**' in content
+    assert "2026-07-12" in content
+    assert "| id | depth |" in content
+    assert "| 46042 | 2000 |" in content
+    assert candidates[0].metadata["root_tag"] == "catalog"
+
+
+def test_xml_adapter_falls_back_on_malformed_xml(tmp_path: Path) -> None:
+    from parsing_agent.format_parsers import XmlParserAdapter
+
+    xml_path = tmp_path / "broken.xml"
+    xml_path.write_text("<unclosed>", encoding="utf-8")
+
+    assert XmlParserAdapter().parse(_source(xml_path, "text/xml"), WorkflowConfig()) == []
+
+
+def test_base_parser_routing_for_new_formats(tmp_path: Path) -> None:
+    runner = WorkflowRunner(config=WorkflowConfig(judge_weight=0, langsmith_tracing=False))
+    cases = {
+        "budget.xlsx": "xlsx-structured",
+        "report.odt": "odt-structured",
+        "catalog.xml": "xml-structured",
+    }
+    for file_name, expected in cases.items():
+        source = DocumentSource(
+            path=tmp_path / file_name,
+            media_type="application/octet-stream",
+            size_bytes=0,
+            run_id="routing-new",
+        )
+        assert runner._base_parser_name_for_source(source) == expected, file_name

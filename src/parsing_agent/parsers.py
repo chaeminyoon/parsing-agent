@@ -27,7 +27,10 @@ from parsing_agent.format_parsers import (
     DataParserAdapter,
     DocxParserAdapter,
     HtmlParserAdapter,
+    OdtParserAdapter,
     PptxParserAdapter,
+    XlsxParserAdapter,
+    XmlParserAdapter,
 )
 from parsing_agent.interfaces import ParserAdapter
 from parsing_agent.models import DocumentSource, ParseCandidate
@@ -1050,8 +1053,11 @@ def build_default_parser_registry() -> ParserRegistry:
             ExtractedSourceTextParserAdapter(),
             DocxParserAdapter(),
             PptxParserAdapter(),
+            XlsxParserAdapter(),
+            OdtParserAdapter(),
             CsvParserAdapter(),
             HtmlParserAdapter(),
             DataParserAdapter(),
+            XmlParserAdapter(),
         ]
     )

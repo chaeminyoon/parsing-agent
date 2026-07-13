@@ -1,0 +1,5 @@
+<stations region="남해" updated="2026-07-01">
+  <station id="46042" name="몬터레이" depth="2000"/>
+  <station id="22101" name="덕적도" depth="30"/>
+  <station id="22103" name="칠발도" depth="33"/>
+</stations>

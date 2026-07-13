@@ -17,7 +17,7 @@
 
 기존 파서(opendataloader, PyMuPDF 계열)에 한국 환경영향평가 보고서를 넣어보니 표가 절반쯤 깨져 나왔다. 파서를 바꿔도 깨지는 위치만 달라졌다. 그래서 파서를 고르는 대신, 파싱 결과가 깨졌다는 걸 알아채고 고치는 에이전틱 워크플로우를 만들었다.
 
-50~200페이지의 PDF를 중심으로 하되, docx/pptx/csv·html/json/yaml·OCR 이미지까지 같은 루프로 처리한다. 구조화 된 표의 내용은 다 잡아낸다.
+50~200페이지의 PDF를 중심으로 하되, docx/pptx/xlsx/odt·csv/html/json/yaml/xml·OCR 이미지까지 같은 루프로 처리한다. 구조화 된 표의 내용은 다 잡아낸다.
 
 ## 특징
 
@@ -207,6 +207,46 @@ Best score: 0.800
 중첩 매핑은 들여쓴 리스트로, 동질 객체 배열(`parsers`)은 자동으로 표가 된다.
 
 
+### 6. 스프레드시트·데이터 파일(.xlsx/.xml/.odt) — 시트와 반복 요소를 표로
+
+`examples/cost_estimate.xlsx`는 2개 시트(공사비·일정)를 가진 엑셀 파일이다.
+
+```console
+$ uv run parsing-agent examples/cost_estimate.xlsx
+Best score: 1.000
+Document: cost_estimate.xlsx
+Stats: 193 chars, 61 words, 13 lines
+```
+
+```markdown
+## 공사비
+
+| 공종 | 수량 | 단가(천원) | 금액(천원) |
+| --- | --- | --- | --- |
+| 오탁방지막 설치 | 2 | 45000 | 90000 |
+| 준설 | 1 | 120000 | 120000 |
+
+## 일정
+
+| 구분 | 일정 |
+| --- | --- |
+| 착공 | 2026-09 |
+| 준공 | 2027-06 |
+```
+
+시트마다 헤딩이 붙고 각 시트가 마크다운 표가 된다 (sharedStrings·inline 문자열·불리언 처리, openpyxl 없이 stdlib SpreadsheetML 파싱). 같은 방식으로 `examples/stations.xml`(0.762)은 반복 요소를 표로, `examples/minutes.odt`(1.000)는 ODF 헤딩·리스트·표를 그대로 살린다:
+
+```markdown
+- **stations (region="남해" updated="2026-07-01"):**
+
+| id | name | depth |
+| --- | --- | --- |
+| 46042 | 몬터레이 | 2000 |
+| 22101 | 덕적도 | 30 |
+| 22103 | 칠발도 | 33 |
+```
+
+
 ## 동작 방식
 
 ```mermaid
@@ -287,7 +327,7 @@ graph TB
 | 기본 파서 | opendataloader-pdf | Java 기반. 파서 어댑터 레지스트리 뒤에 있어서 다른 파서로 교체하거나 추가할 수 있다 |
 | OCR | Surya (subprocess) | 스캔 페이지용. 실패해도 파이프라인은 계속 간다 (fail-open) |
 | 트레이싱 | LangSmith | 노드 입출력을 구조화 요약으로만 내보낸다. 문서 원문은 트레이스에 나가지 않는다 |
-| 테스트/패키징 | pytest, uv, GitHub Actions | 236개 테스트가 1초 안에 돈다. 전부 모킹 기반이라 API 키 없이 CI에서 돈다 |
+| 테스트/패키징 | pytest, uv, GitHub Actions | 242개 테스트가 1초 안에 돈다. 전부 모킹 기반이라 API 키 없이 CI에서 돈다 |
 
 openai SDK 대신 urllib를 직접 쓰는 건 의도한 선택이다. 재시도 정책과 비용 계측을 호출 지점 한 곳(`_call_with_retry`)에서 통제하고 싶었고, SDK 버전 업그레이드에 끌려다니고 싶지 않았다. LangGraph를 쓴 이유는 반대로 직접 만들기 싫어서다. 조건부 엣지와 상태 병합을 손으로 짜면 그게 또 하나의 버그 표면이 된다.
 
@@ -353,13 +393,14 @@ src/parsing_agent/
 
 benchmarks/            # 외부 파서 head-to-head
 golden/                # 사람 라벨 골든셋 (라벨링 가이드, 상관 분석)
-tests/                 # 236 tests
+tests/                 # 242 tests
 ```
 
 ## 로드맵
 - [x] .pdf 파싱지원
 - [x] 텍스트기반 .docx / .pptx / .csv 파싱지원 — 구조 보존 어댑터 (OOXML을 stdlib zipfile+ElementTree로 직접 파싱해 헤딩/리스트/표 유지, CSV는 마크다운 표로 렌더링·cp949/euc-kr 폴백)
 - [x] 웹 개발 데이터 포맷 .html / .htm / .json / .yaml 파싱지원 — HTML 가시 텍스트→마크다운(script/style 제거), JSON/YAML 계층→중첩 마크다운·객체 배열은 표로
+- [x] 스프레드시트·데이터 포맷 .xlsx(시트별 마크다운 표, stdlib SpreadsheetML) / .odt / 구조화 .xml(반복 요소를 표로) 파싱지원
 - [x] OCR연동 포맷 .png / .jpg / .jpeg / .tiff 파싱지원 — Surya OCR 경로로 라우팅(PARSING_AGENT_OCR_ENABLED=1), OCR 텍스트가 동일한 평가/수리 루프를 통과
 
 

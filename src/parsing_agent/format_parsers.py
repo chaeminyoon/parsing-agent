@@ -40,17 +40,23 @@ from parsing_agent.textutil import normalize_markdown_text, read_text_with_fallb
 STRUCTURED_SUFFIX_PARSERS = {
     ".docx": "docx-structured",
     ".pptx": "pptx-structured",
+    ".xlsx": "xlsx-structured",
+    ".odt": "odt-structured",
     ".csv": "csv-structured",
     ".html": "html-structured",
     ".htm": "html-structured",
     ".json": "data-structured",
     ".yaml": "data-structured",
     ".yml": "data-structured",
+    ".xml": "xml-structured",
 }
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 _P = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+_S = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_ODF_TEXT = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
+_ODF_TABLE = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
 
 _HEADING_STYLE_RE = re.compile(r"heading\s*([1-9])", re.IGNORECASE)
 
@@ -560,6 +566,311 @@ class DataParserAdapter(ParserAdapter):
                     "data_format": data_format,
                     "top_level_type": type(value).__name__,
                 },
+                source_path=source.path,
+            )
+        ]
+
+
+# ---------------------------------------------------------------------------
+# XLSX (xl/worksheets/sheetN.xml — SpreadsheetML)
+# ---------------------------------------------------------------------------
+
+_R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_CELL_REF_RE = re.compile(r"^([A-Z]+)(\d+)$")
+
+
+def _excel_column_index(ref: str) -> int | None:
+    match = _CELL_REF_RE.match(ref or "")
+    if match is None:
+        return None
+    index = 0
+    for ch in match.group(1):
+        index = index * 26 + (ord(ch) - ord("A") + 1)
+    return index - 1
+
+
+def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in archive.namelist():
+        return []
+    root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+    return [
+        _clean_inline("".join(t.text or "" for t in si.iter(f"{_S}t")))
+        for si in root.findall(f"{_S}si")
+    ]
+
+
+def _xlsx_cell_value(cell: ElementTree.Element, shared: list[str]) -> str:
+    cell_type = cell.get("t", "n")
+    if cell_type == "inlineStr":
+        return _clean_inline("".join(t.text or "" for t in cell.iter(f"{_S}t")))
+    value = cell.findtext(f"{_S}v") or ""
+    if cell_type == "s":
+        try:
+            return shared[int(value)]
+        except (ValueError, IndexError):
+            return ""
+    if cell_type == "b":
+        return "TRUE" if value == "1" else "FALSE"
+    return _clean_inline(value)
+
+
+def _xlsx_sheet_rows(root: ElementTree.Element, shared: list[str]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for row in root.iter(f"{_S}row"):
+        cells: list[str] = []
+        next_index = 0
+        for cell in row.findall(f"{_S}c"):
+            index = _excel_column_index(cell.get("r", ""))
+            if index is None:
+                index = next_index
+            while len(cells) < index:
+                cells.append("")
+            cells.append(_xlsx_cell_value(cell, shared))
+            next_index = index + 1
+        if any(cell for cell in cells):
+            rows.append(cells)
+    return rows
+
+
+def _xlsx_blocks(path: Path) -> tuple[list[tuple], dict[str, int]]:
+    blocks: list[tuple] = []
+    stats = {"sheet_count": 0, "table_count": 0}
+    with zipfile.ZipFile(path) as archive:
+        shared = _xlsx_shared_strings(archive)
+        workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+        rels_root = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        rel_ns = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+        targets = {rel.get("Id"): rel.get("Target", "") for rel in rels_root.iter(f"{rel_ns}Relationship")}
+        for sheet in workbook.iter(f"{_S}sheet"):
+            target = targets.get(sheet.get(f"{_R_NS}id"), "")
+            if not target:
+                continue
+            member = target if target.startswith("xl/") else f"xl/{target.lstrip('/')}"
+            if member not in archive.namelist():
+                continue
+            rows = _xlsx_sheet_rows(ElementTree.fromstring(archive.read(member)), shared)
+            stats["sheet_count"] += 1
+            blocks.append(("heading", 2, sheet.get("name") or f"Sheet{stats['sheet_count']}"))
+            if rows:
+                blocks.append(("table", rows))
+                stats["table_count"] += 1
+    return blocks, stats
+
+
+def parse_xlsx(path: Path) -> tuple[str, str, dict[str, int]]:
+    blocks, stats = _xlsx_blocks(path)
+    return _render_blocks_markdown(blocks), _render_blocks_plain(blocks), stats
+
+
+def extract_xlsx_text(path: Path) -> str:
+    return parse_xlsx(path)[1]
+
+
+# ---------------------------------------------------------------------------
+# ODT (content.xml — OpenDocument Text)
+# ---------------------------------------------------------------------------
+
+
+def _odt_text(element: ElementTree.Element) -> str:
+    return _clean_inline("".join(element.itertext()))
+
+
+def _odt_table_rows(table: ElementTree.Element) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for row in table.findall(f"{_ODF_TABLE}table-row"):
+        cells: list[str] = []
+        for cell in row.findall(f"{_ODF_TABLE}table-cell"):
+            repeat = int(cell.get(f"{_ODF_TABLE}number-columns-repeated", "1") or "1")
+            cells.extend([_odt_text(cell)] * min(repeat, 64))
+        rows.append(cells)
+    return rows
+
+
+def _odt_blocks(path: Path) -> tuple[list[tuple], dict[str, int]]:
+    office = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
+    with zipfile.ZipFile(path) as archive:
+        root = ElementTree.fromstring(archive.read("content.xml"))
+    body = root.find(f"{office}body/{office}text")
+    blocks: list[tuple] = []
+    stats = {"paragraph_count": 0, "heading_count": 0, "table_count": 0}
+    if body is None:
+        return blocks, stats
+    for child in body:
+        if child.tag == f"{_ODF_TEXT}h":
+            text = _odt_text(child)
+            if text:
+                level = int(child.get(f"{_ODF_TEXT}outline-level", "1") or "1")
+                blocks.append(("heading", min(level, 6), text))
+                stats["heading_count"] += 1
+        elif child.tag == f"{_ODF_TEXT}p":
+            text = _odt_text(child)
+            if text:
+                blocks.append(("para", text))
+                stats["paragraph_count"] += 1
+        elif child.tag == f"{_ODF_TEXT}list":
+            for item in child.iter(f"{_ODF_TEXT}list-item"):
+                text = _odt_text(item)
+                if text:
+                    blocks.append(("list", text))
+                    stats["paragraph_count"] += 1
+        elif child.tag == f"{_ODF_TABLE}table":
+            rows = _odt_table_rows(child)
+            if rows:
+                blocks.append(("table", rows))
+                stats["table_count"] += 1
+    return blocks, stats
+
+
+def parse_odt(path: Path) -> tuple[str, str, dict[str, int]]:
+    blocks, stats = _odt_blocks(path)
+    return _render_blocks_markdown(blocks), _render_blocks_plain(blocks), stats
+
+
+def extract_odt_text(path: Path) -> str:
+    return parse_odt(path)[1]
+
+
+# ---------------------------------------------------------------------------
+# XML (범용 — 계층은 리스트로, 동질 반복 요소는 표로)
+# ---------------------------------------------------------------------------
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.split("}")[-1] if "}" in tag else tag
+
+
+def _xml_is_flat(element: ElementTree.Element) -> bool:
+    return len(element) == 0
+
+
+def _xml_flat_children_table(children: list[ElementTree.Element]) -> list[list[str]] | None:
+    """같은 태그의 평평한 형제가 2개 이상이면 attribute+text를 표로 편다."""
+    if len(children) < 2 or not all(_xml_is_flat(child) for child in children):
+        return None
+    if len({_xml_local_name(child.tag) for child in children}) != 1:
+        return None
+    headers: list[str] = []
+    for child in children:
+        for key in child.attrib:
+            name = _xml_local_name(key)
+            if name not in headers:
+                headers.append(name)
+    has_text = any(_clean_inline(child.text or "") for child in children)
+    columns = headers + (["text"] if has_text else [])
+    if not columns:
+        return None
+    rows = [columns]
+    for child in children:
+        attrs = {_xml_local_name(k): v for k, v in child.attrib.items()}
+        row = [attrs.get(name, "") for name in headers]
+        if has_text:
+            row.append(_clean_inline(child.text or ""))
+        rows.append(row)
+    return rows
+
+
+def _render_xml_element(element: ElementTree.Element, depth: int = 0) -> list[str]:
+    indent = "  " * depth
+    name = _xml_local_name(element.tag)
+    attrs = " ".join(f'{_xml_local_name(k)}="{v}"' for k, v in element.attrib.items())
+    text = _clean_inline(element.text or "")
+    label = f"{name} ({attrs})" if attrs else name
+    lines = [f"{indent}- **{label}:** {text}".rstrip()]
+
+    children = list(element)
+    index = 0
+    while index < len(children):
+        child = children[index]
+        # 같은 태그의 연속 형제 묶음을 찾아 표 후보로 검사한다.
+        group = [child]
+        while (
+            index + len(group) < len(children)
+            and children[index + len(group)].tag == child.tag
+        ):
+            group.append(children[index + len(group)])
+        table_rows = _xml_flat_children_table(group)
+        if table_rows is not None:
+            lines.append("")
+            lines.append(rows_to_markdown(table_rows))
+            lines.append("")
+        else:
+            for member in group:
+                lines.extend(_render_xml_element(member, depth + 1))
+        index += len(group)
+    return lines
+
+
+def render_xml_markdown(root: ElementTree.Element) -> str:
+    return normalize_markdown_text("\n".join(_render_xml_element(root))).strip()
+
+
+# ---------------------------------------------------------------------------
+# 추가 어댑터 (xlsx / odt / xml)
+# ---------------------------------------------------------------------------
+
+
+class XlsxParserAdapter(ParserAdapter):
+    name = "xlsx-structured"
+
+    def parse(self, source: DocumentSource, config: WorkflowConfig) -> list[ParseCandidate]:
+        if source.path.suffix.lower() != ".xlsx":
+            return []
+        markdown, _, stats = parse_xlsx(source.path)
+        if not markdown.strip():
+            return []
+        return [
+            ParseCandidate(
+                parser_name=self.name,
+                content=markdown,
+                format_name=config.output_format,
+                metadata={"media_type": source.media_type, **stats},
+                source_path=source.path,
+            )
+        ]
+
+
+class OdtParserAdapter(ParserAdapter):
+    name = "odt-structured"
+
+    def parse(self, source: DocumentSource, config: WorkflowConfig) -> list[ParseCandidate]:
+        if source.path.suffix.lower() != ".odt":
+            return []
+        markdown, _, stats = parse_odt(source.path)
+        if not markdown.strip():
+            return []
+        return [
+            ParseCandidate(
+                parser_name=self.name,
+                content=markdown,
+                format_name=config.output_format,
+                metadata={"media_type": source.media_type, **stats},
+                source_path=source.path,
+            )
+        ]
+
+
+class XmlParserAdapter(ParserAdapter):
+    """범용 XML의 구조 보존 렌더. 파싱 실패 시 raw-text 폴백에 맡긴다."""
+
+    name = "xml-structured"
+
+    def parse(self, source: DocumentSource, config: WorkflowConfig) -> list[ParseCandidate]:
+        if source.path.suffix.lower() != ".xml":
+            return []
+        text = read_text_with_fallback(source.path)
+        try:
+            root = ElementTree.fromstring(text)
+        except ElementTree.ParseError:
+            return []
+        markdown = render_xml_markdown(root)
+        if not markdown.strip():
+            return []
+        return [
+            ParseCandidate(
+                parser_name=self.name,
+                content=markdown,
+                format_name=config.output_format,
+                metadata={"media_type": source.media_type, "root_tag": _xml_local_name(root.tag)},
                 source_path=source.path,
             )
         ]

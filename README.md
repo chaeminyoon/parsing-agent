@@ -27,7 +27,7 @@ The project was shaped around Korean environmental impact assessment reports, wh
 - Validates vision table repair against real text/cell evidence and rejects mismatched patches.
 - Tracks LLM usage by stage, including calls, retries, latency, and tokens.
 - Supports Korean-specific document cleanup such as sentence merging and table-label matching.
-- Parses `.docx`/`.pptx`/`.csv`, `.html`/`.json`/`.yaml`, and OCR image formats through the same loop as PDF.
+- Parses `.docx`/`.pptx`/`.xlsx`/`.odt`, `.csv`/`.html`/`.json`/`.yaml`/`.xml`, and OCR image formats through the same loop as PDF.
 - Evaluates structured (non-PDF) formats on decoration-stripped content, so the parser is never penalized for adding headings or tables the plain-text source could not express (`PARSING_AGENT_STRUCTURED_CONTENT_EVALUATION_ENABLED`, default on).
 - Runs without an API key by falling back to deterministic metrics and non-LLM repair paths.
 
@@ -206,6 +206,46 @@ Best score: 0.800
 Nested mappings become indented lists; the homogeneous object array (`parsers`) automatically becomes a table.
 
 
+### 6. Spreadsheets & data files (.xlsx/.xml/.odt) — sheets and repeated elements as tables
+
+`examples/cost_estimate.xlsx` is an Excel file with two sheets (cost, schedule).
+
+```console
+$ uv run parsing-agent examples/cost_estimate.xlsx
+Best score: 1.000
+Document: cost_estimate.xlsx
+Stats: 193 chars, 61 words, 13 lines
+```
+
+```markdown
+## 공사비
+
+| 공종 | 수량 | 단가(천원) | 금액(천원) |
+| --- | --- | --- | --- |
+| 오탁방지막 설치 | 2 | 45000 | 90000 |
+| 준설 | 1 | 120000 | 120000 |
+
+## 일정
+
+| 구분 | 일정 |
+| --- | --- |
+| 착공 | 2026-09 |
+| 준공 | 2027-06 |
+```
+
+Each sheet gets a heading and becomes a markdown table (sharedStrings, inline strings, and booleans handled — stdlib SpreadsheetML parsing, no openpyxl). Likewise `examples/stations.xml` (0.762) turns repeated elements into a table, and `examples/minutes.odt` (1.000) keeps ODF headings/lists/tables:
+
+```markdown
+- **stations (region="남해" updated="2026-07-01"):**
+
+| id | name | depth |
+| --- | --- | --- |
+| 46042 | 몬터레이 | 2000 |
+| 22101 | 덕적도 | 30 |
+| 22103 | 칠발도 | 33 |
+```
+
+
 ## Workflow
 
 ```mermaid
@@ -344,6 +384,7 @@ tests/                 # test suite
 - [x] PDF parsing support
 - [x] Text-based `.docx`, `.pptx`, and `.csv` parsing support — structure-preserving adapters (headings/lists/tables from OOXML via stdlib `zipfile`+`ElementTree`, CSV rendered as a markdown table with cp949/euc-kr fallback)
 - [x] Web/data formats: `.html`, `.htm`, `.json`, `.yaml` — HTML visible text → markdown (scripts/styles stripped), JSON/YAML hierarchy → nested markdown with object arrays as tables
+- [x] Spreadsheet & data formats: `.xlsx` (per-sheet markdown tables, stdlib SpreadsheetML), `.odt`, structured `.xml` (repeated elements as tables)
 - [x] OCR image formats: `.png`, `.jpg`, `.jpeg`, `.tiff` — routed through the Surya OCR path (`PARSING_AGENT_OCR_ENABLED=1`), OCR text then flows through the same evaluate/repair loop
 
 ## License

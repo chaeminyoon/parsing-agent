@@ -7,7 +7,13 @@ from pypdf import PdfReader
 
 from parsing_agent.config import WorkflowConfig
 from parsing_agent.filetype import is_pdf, is_text_like
-from parsing_agent.format_parsers import extract_docx_text, extract_html_text, extract_pptx_text
+from parsing_agent.format_parsers import (
+    extract_docx_text,
+    extract_html_text,
+    extract_odt_text,
+    extract_pptx_text,
+    extract_xlsx_text,
+)
 from parsing_agent.models import DocumentSource
 from parsing_agent.ocr import run_ocr, should_run_ocr
 from parsing_agent.textutil import read_text_with_fallback
@@ -32,6 +38,10 @@ def extract_source_text(path: Path, media_type: str) -> tuple[str | None, int | 
     if suffix == ".pptx":
         text, slide_count = extract_pptx_text(path)
         return text, slide_count
+    if suffix == ".xlsx":
+        return extract_xlsx_text(path), None
+    if suffix == ".odt":
+        return extract_odt_text(path), None
     # HTML은 마크업이 아니라 가시 텍스트가 평가 기준이 되어야 한다.
     if suffix in (".html", ".htm") or media_type == "text/html":
         return extract_html_text(path), None
