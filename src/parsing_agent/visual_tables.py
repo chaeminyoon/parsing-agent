@@ -760,3 +760,105 @@ def insert_table_after_anchor(
     if content.endswith("\n"):
         normalized += "\n"
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# 다중페이지 분할 표 병합 (골든셋 파일럿에서 사람이 지목한 1순위 결함)
+#
+# 페이지 경계에서 잘린 표는 페이지별로는 멀쩡해 보여서 per-page 그리드 심판이
+# 못 잡는다 (실측: TEDS 0.85 vs 사람 표점수 2). 연속된 표 블록이 페이지
+# 마커/빈 줄만 사이에 두고 같은 열 구조를 가지면 하나로 병합한다.
+# ---------------------------------------------------------------------------
+
+_MERGE_PAGE_MARKER_RE = re.compile(r"^<!--\s*page\s+\d+\s*-->$")
+_CONTINUATION_LINE_RE = re.compile(r"^\(?\s*(?:계\s*속|continued?)\s*\)?$", re.IGNORECASE)
+
+
+def _split_table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _is_separator_row(line: str) -> bool:
+    cells = _split_table_cells(line)
+    return bool(cells) and all(cell and set(cell) <= {"-", ":"} for cell in cells)
+
+
+def _is_table_row_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+
+
+def merge_split_tables(content: str) -> str:
+    """페이지 경계로 잘린 마크다운 표를 보수적으로 병합한다.
+
+    병합 조건: 앞 표와 뒤 표 사이에 빈 줄·페이지 마커·'(계속)' 줄만 있고,
+    열 수가 같으며, 뒤 표가 앞 표의 헤더를 반복하거나 헤더 없이 이어질 것.
+    사이에 있던 페이지 마커는 병합된 표 뒤로 옮긴다 (앵커 보존).
+    """
+    lines = content.splitlines()
+    result: list[str] = []
+    merged_any = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        result.append(line)
+        index += 1
+        if not _is_table_row_line(line):
+            continue
+        # 현재 표 블록의 끝까지 복사
+        while index < len(lines) and _is_table_row_line(lines[index]):
+            result.append(lines[index])
+            index += 1
+        header_cells = None
+        # result 뒤쪽에서 이 블록의 헤더(구분선 직전 행)를 찾는다
+        for back in range(len(result) - 1, -1, -1):
+            if not _is_table_row_line(result[back]):
+                break
+            if _is_separator_row(result[back]) and back > 0 and _is_table_row_line(result[back - 1]):
+                header_cells = _split_table_cells(result[back - 1])
+                break
+        # 이어지는 병합 후보들을 반복 흡수. 사이의 페이지 마커를 즉시 붙이면
+        # 표가 끊기므로, 이 표의 병합이 끝난 뒤 표 아래로 옮긴다 (앵커 보존).
+        deferred_markers: list[str] = []
+        while True:
+            gap: list[str] = []
+            probe = index
+            while probe < len(lines) and len(gap) <= 4:
+                stripped = lines[probe].strip()
+                if stripped == "" or _MERGE_PAGE_MARKER_RE.match(stripped) or _CONTINUATION_LINE_RE.match(stripped):
+                    gap.append(lines[probe])
+                    probe += 1
+                    continue
+                break
+            if probe >= len(lines) or not _is_table_row_line(lines[probe]):
+                break
+            # 다음 표 블록 수집
+            next_block: list[str] = []
+            while probe < len(lines) and _is_table_row_line(lines[probe]):
+                next_block.append(lines[probe])
+                probe += 1
+            if header_cells is None or len(_split_table_cells(next_block[0])) != len(header_cells):
+                break
+            body = next_block
+            if len(next_block) >= 2 and _is_separator_row(next_block[1]):
+                if _split_table_cells(next_block[0]) == header_cells:
+                    # 앞 표 헤더의 반복 — 헤더·구분선을 버린다.
+                    body = next_block[2:]
+                else:
+                    # 실측(CO-OPS): 페이지 단편의 첫 데이터 행이 헤더로 오인된
+                    # 형태가 지배적이다. 사이에 캡션·본문 없이 같은 열 수로
+                    # 붙어 있으면 연속으로 보고, 가짜 헤더를 데이터로 강등한다.
+                    body = [next_block[0]] + next_block[2:]
+            elif any(_is_separator_row(row) for row in next_block):
+                break
+            if not body:
+                break
+            result.extend(body)
+            merged_any = True
+            deferred_markers.extend(g for g in gap if _MERGE_PAGE_MARKER_RE.match(g.strip()))
+            index = probe
+        if deferred_markers:
+            result.append("")
+            result.extend(deferred_markers)
+    # 병합이 없었으면 원본을 그대로 돌려준다 (끝 개행 등 무의미한 차이 방지).
+    return "\n".join(result) if merged_any else content

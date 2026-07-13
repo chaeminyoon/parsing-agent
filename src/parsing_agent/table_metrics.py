@@ -101,6 +101,28 @@ def teds_lite(reference: Grid, candidate: Grid) -> float:
     return score / total_cells
 
 
+def teds_lite_best_offset(reference: Grid, candidate: Grid, *, max_offsets: int = 400) -> float:
+    """행 오프셋을 허용한 TEDS-lite — 병합된 다중페이지 표를 공정하게 심판한다.
+
+    페이지 경계로 잘렸던 표를 후보가 하나로 병합하면, 2페이지째 기준 그리드는
+    병합 표의 중간 행부터 시작한다. 오프셋 0만 보는 기존 방식은 그 병합을
+    역감점해서 (사람이 원하는) 수리를 롤백시킨다. 기준 그리드가 후보의 어느
+    행에서 시작하든 최고 정렬을 취한다.
+    """
+    if not reference or not candidate:
+        return 0.0
+    limit = min(max(len(candidate) - 1, 0), max_offsets)
+    best = 0.0
+    for offset in range(0, limit + 1):
+        window = candidate[offset : offset + len(reference)]
+        if not window:
+            break
+        best = max(best, teds_lite(reference, window))
+        if best >= 0.999:
+            break
+    return best
+
+
 def _extract_candidate_grids(candidate_text: str) -> list[Grid]:
     grids: list[Grid] = []
     current: list[str] = []
@@ -133,5 +155,5 @@ def calculate_table_cell_similarity(
         return 0.0
     total = 0.0
     for reference in reference_grids:
-        total += max(teds_lite(reference, candidate) for candidate in candidate_grids)
+        total += max(teds_lite_best_offset(reference, candidate) for candidate in candidate_grids)
     return total / len(reference_grids)

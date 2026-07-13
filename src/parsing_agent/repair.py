@@ -8,6 +8,7 @@ from typing import Any
 from parsing_agent.filetype import is_pdf
 from parsing_agent.fusion import fuse_missing_body_lines, fuse_tables_from_alternate
 from parsing_agent.toc import restore_headings_from_toc
+from parsing_agent.visual_tables import merge_split_tables
 from parsing_agent.interfaces import CandidateRepairer
 from parsing_agent.models import DocumentSource, EvaluationIssue, EvaluationMetrics, ParseCandidate, RepairAction
 from parsing_agent.visual_repair import (
@@ -669,6 +670,12 @@ def apply_table_normalizations(text: str) -> tuple[str, list[str]]:
     if _has_merged_leading_gaps(text):
         text = _fill_merged_leading_cells(text)
         applied.append("fill_merged_leading_cells")
+    # 다중페이지 분할 병합 — 골든 파일럿에서 사람이 지목한 1순위 결함.
+    # 오프셋 TEDS로도 채점기는 병합에 중립이라(보상 불가) 루프 밖에서 확정한다.
+    merged = merge_split_tables(text)
+    if merged != text:
+        text = merged
+        applied.append("merge_split_multipage_tables")
     return text, applied
 
 
