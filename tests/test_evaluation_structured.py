@@ -218,3 +218,25 @@ def test_labeled_pdf_keeps_label_matching_metric(tmp_path: Path, monkeypatch) ->
     metrics = DeterministicEvaluator(config=WorkflowConfig(judge_weight=0)).evaluate(source, candidate)
 
     assert metrics.table_preservation < 1.0  # TEDS로 덮어쓰지 않는다
+
+
+def test_pdf_similarity_is_not_penalized_by_table_markup(tmp_path: Path) -> None:
+    """표가 좋아질수록 유사도가 나빠지던 PDF 경로의 역설(실측 0.76→0.46) 회귀 가드."""
+    pdf_path = tmp_path / "tables.pdf"
+    pdf_path.write_bytes(b"%PDF-FAKE")
+    plain = "구간 연장 형식\n북측 호안 320 고정식\n남측 개구부 180 이동식"
+    source = DocumentSource(
+        path=pdf_path, media_type="application/pdf", size_bytes=0, run_id="pdf-sim",
+        extracted_text=plain, page_count=1,
+    )
+    tabled = _candidate(
+        "| 구간 | 연장 | 형식 |\n| --- | --- | --- |\n| 북측 호안 | 320 | 고정식 |\n| 남측 개구부 | 180 | 이동식 |"
+    )
+
+    on = DeterministicEvaluator(config=WorkflowConfig(judge_weight=0)).evaluate(source, tabled)
+    off = DeterministicEvaluator(
+        config=WorkflowConfig(judge_weight=0, pdf_content_similarity_enabled=False)
+    ).evaluate(source, tabled)
+
+    assert on.normalized_similarity > 0.9   # 장식 제거 후엔 사실상 동일 콘텐츠
+    assert on.normalized_similarity > off.normalized_similarity

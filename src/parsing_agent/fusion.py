@@ -41,11 +41,13 @@ _TABLE_SWAP_FLOOR = 0.5
 # 현재 후보의 표가 이 점수 미만이면 '대응 표 없음'으로 보고 삽입 경로를 탄다.
 _TABLE_MATCH_FLOOR = 0.2
 
-# 대체 파서 매핑 — 현재 후보를 만든 파서의 반대편 PDF 파서.
-_ALTERNATE_PDF_PARSERS = {
-    "opendataloader-pdf": "layout-first-pdf",
-    "layout-first-pdf": "opendataloader-pdf",
-}
+# 대체 파서 매핑 — 현재 후보를 만든 파서를 제외한 나머지 PDF 파서 전부.
+# docling은 옵셔널이라 미설치면 어댑터가 빈 결과를 내고 자연히 빠진다.
+_PDF_PARSER_POOL = ("opendataloader-pdf", "layout-first-pdf", "docling-pdf")
+
+
+def _alternate_parser_names(current_parser: str) -> list[str]:
+    return [name for name in _PDF_PARSER_POOL if name != (current_parser or "")]
 
 # 대체 파서 실행은 비싸다(Java 서브프로세스/레이아웃 분석) — 경로별로 캐시.
 _alternate_content_cache: dict[tuple[str, str], str | None] = {}
@@ -137,10 +139,7 @@ def _grid_to_markdown(lines: list[str], start: int, end: int) -> list[str]:
     return lines[start : end + 1]
 
 
-def _alternate_candidate_content(source: DocumentSource, current_parser: str) -> str | None:
-    alternate_name = _ALTERNATE_PDF_PARSERS.get(current_parser or "")
-    if alternate_name is None:
-        return None
+def _single_alternate_content(source: DocumentSource, alternate_name: str) -> str | None:
     cache_key = (str(source.path), alternate_name)
     if cache_key in _alternate_content_cache:
         return _alternate_content_cache[cache_key]
@@ -162,6 +161,15 @@ def _alternate_candidate_content(source: DocumentSource, current_parser: str) ->
     return content
 
 
+def _alternate_candidate_contents(source: DocumentSource, current_parser: str) -> list[str]:
+    contents: list[str] = []
+    for alternate_name in _alternate_parser_names(current_parser):
+        content = _single_alternate_content(source, alternate_name)
+        if content:
+            contents.append(content)
+    return contents
+
+
 def fuse_tables_from_alternate(
     source: DocumentSource,
     content: str,
@@ -179,16 +187,24 @@ def fuse_tables_from_alternate(
         reference_grids = extract_pdf_table_grids(source.path)
     if not reference_grids:
         return content
-    if alternate_content is None:
-        alternate_content = _alternate_candidate_content(source, current_parser)
-    if not alternate_content:
+    if alternate_content is not None:
+        alternate_contents = [alternate_content]
+    else:
+        alternate_contents = _alternate_candidate_contents(source, current_parser)
+    if not alternate_contents:
         return content
 
     current_lines = content.splitlines()
-    alternate_lines = alternate_content.splitlines()
     current_blocks = _candidate_table_blocks(content)
-    alternate_blocks = _candidate_table_blocks(alternate_content)
-    if not alternate_blocks:
+
+    # 모든 대체 후보의 표 블록을 하나의 풀로 합친다 — docling·layout-first 등
+    # 어느 엔진의 표든 그리드 심판 앞에서는 동등한 후보다.
+    pooled_blocks: list[tuple[Grid, list[str], int, int]] = []
+    for alternate in alternate_contents:
+        alternate_lines = alternate.splitlines()
+        for grid, start, end in _candidate_table_blocks(alternate):
+            pooled_blocks.append((grid, alternate_lines, start, end))
+    if not pooled_blocks:
         return content
 
     current_index = {_normalize_line(line): i for i, line in enumerate(current_lines) if line.strip()}
@@ -203,17 +219,17 @@ def fuse_tables_from_alternate(
             if score > current_score:
                 current_score, current_pick = score, block_index
         alternate_scored = [
-            (teds_lite(reference, grid), block_index)
-            for block_index, (grid, _, _) in enumerate(alternate_blocks)
-            if block_index not in used_alternates
+            (teds_lite(reference, grid), pool_index)
+            for pool_index, (grid, _, _, _) in enumerate(pooled_blocks)
+            if pool_index not in used_alternates
         ]
         if not alternate_scored:
             continue
         alternate_score, alternate_pick = max(alternate_scored)
         if alternate_score < _TABLE_SWAP_FLOOR:
             continue
-        _, alt_start, alt_end = alternate_blocks[alternate_pick]
-        new_block = _grid_to_markdown(alternate_lines, alt_start, alt_end)
+        _, alt_lines, alt_start, alt_end = pooled_blocks[alternate_pick]
+        new_block = _grid_to_markdown(alt_lines, alt_start, alt_end)
         if current_pick is not None and current_score >= _TABLE_MATCH_FLOOR:
             # 현재 후보에 대응 표가 있다 → 대체가 마진 이상 좋을 때만 교체.
             if alternate_score < current_score + _TABLE_SWAP_MARGIN:
@@ -225,7 +241,7 @@ def fuse_tables_from_alternate(
         else:
             # 현재 후보가 이 표를 통째로 잃었다 — 가장 큰 승리 케이스.
             # 대체 후보에서 표 직전 문맥 줄을 앵커로 삼아 같은 위치에 삽입한다.
-            anchor = _insertion_anchor(alternate_lines, alt_start, current_index)
+            anchor = _insertion_anchor(alt_lines, alt_start, current_index)
             insertions.setdefault(anchor, []).append(new_block)
         used_alternates.add(alternate_pick)
 

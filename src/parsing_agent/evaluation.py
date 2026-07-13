@@ -1082,11 +1082,16 @@ class DeterministicEvaluator(CandidateEvaluator):
         if table_structure_consistency < 1.0:
             # 라벨은 남았지만 열 구조가 깨진 표를 라벨 매칭 점수와 별개로 반영한다.
             table_preservation = _clamp(table_preservation * (0.7 + 0.3 * table_structure_consistency))
-        similarity = (
-            calculate_content_similarity(source_text, strip_markdown_decorations(candidate_text))
-            if structured
-            else calculate_normalized_similarity(source_text, candidate_text)
-        )
+        if structured:
+            similarity = calculate_content_similarity(source_text, strip_markdown_decorations(candidate_text))
+        elif _is_pdf_source(source) and getattr(self._config, "pdf_content_similarity_enabled", True):
+            # pypdf 선형 원문 vs 마크다운 후보를 그대로 문자열 비교하면 표가
+            # 좋아질수록 유사도가 나빠진다. 장식을 걷어낸 콘텐츠로 비교한다.
+            similarity = calculate_normalized_similarity(
+                source_text, strip_markdown_decorations(candidate_text)
+            )
+        else:
+            similarity = calculate_normalized_similarity(source_text, candidate_text)
         metrics = EvaluationMetrics(
             text_coverage=calculate_text_coverage(source_text, candidate_text),
             normalized_similarity=similarity,

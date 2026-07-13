@@ -95,6 +95,11 @@ class WorkflowConfig:
     structured_content_evaluation_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_STRUCTURED_CONTENT_EVALUATION_ENABLED", True)
     )
+    # PDF 유사도를 마크다운 장식 제거 후 비교한다 — 표가 좋아질수록 문자열
+    # 유사도가 나빠지는 역설(실측: 표 셀 0.44→0.85 개선에 sim 0.76→0.46 추락) 방지.
+    pdf_content_similarity_enabled: bool = field(
+        default_factory=lambda: _env_flag("PARSING_AGENT_PDF_CONTENT_SIMILARITY_ENABLED", True)
+    )
     # 라벨 없는 PDF에서 표 보존율을 TEDS-lite(괘선 그리드 셀 유사도)로 대체한다.
     teds_table_fallback_enabled: bool = field(
         default_factory=lambda: _env_flag("PARSING_AGENT_TEDS_TABLE_FALLBACK_ENABLED", True)

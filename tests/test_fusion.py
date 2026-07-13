@@ -188,3 +188,53 @@ def test_workflow_config_accepts_fusion_defaults() -> None:
     # 융합 라우트는 heuristic(무료)이라 별도 게이트 없이 항상 후보에 오른다.
     # 이 테스트는 config가 그 전제를 깨는 필드를 요구하지 않음을 고정한다.
     WorkflowConfig(judge_weight=0)
+
+
+# ---------------------------------------------------------------------------
+# 다중 대체 후보 (docling 풀 편입)
+# ---------------------------------------------------------------------------
+
+
+def test_fusion_pools_tables_across_multiple_alternates(tmp_path: Path, monkeypatch) -> None:
+    """대체 후보가 여럿일 때 그리드 심판이 풀 전체에서 최고 표를 고른다."""
+    import parsing_agent.fusion as fusion
+
+    source = _pdf_source(tmp_path, "본문")
+    content = "제목 문단\n\n| 구간 | 연장 |\n| --- | --- |\n| 깨진값 |  |\n| 또깨짐 |  |"
+    weak_alt = "| 구간 | 연장 |\n| --- | --- |\n| 북측호안 320 |  |\n| 남측 |  |"
+    strong_alt = "| 구간 | 연장 |\n| --- | --- |\n| 북측 호안 | 320 |\n| 남측 개구부 | 180 |"
+    monkeypatch.setattr(fusion, "_alternate_candidate_contents", lambda s, p: [weak_alt, strong_alt])
+
+    fused = fusion.fuse_tables_from_alternate(
+        source, content, current_parser="opendataloader-pdf", reference_grids=[_REFERENCE],
+    )
+
+    assert "| 북측 호안 | 320 |" in fused  # 풀에서 strong_alt가 선택된다
+    assert "깨진값" not in fused
+
+
+def test_docling_adapter_degrades_gracefully_when_missing(tmp_path: Path) -> None:
+    """docling 미설치 환경(CI)에서 어댑터는 빈 결과로 우아하게 저하한다."""
+    from parsing_agent.docling_parser import DoclingPdfParserAdapter, docling_available
+
+    pdf_path = tmp_path / "doc.pdf"
+    pdf_path.write_bytes(b"%PDF-FAKE")
+    source = DocumentSource(
+        path=pdf_path, media_type="application/pdf", size_bytes=0, run_id="docling",
+    )
+
+    candidates = DoclingPdfParserAdapter().parse(source, WorkflowConfig())
+
+    if not docling_available():
+        assert candidates == []
+    # 설치돼 있으면 가짜 PDF라 변환 실패 → 역시 빈 결과 (예외 없이)
+    else:
+        assert candidates == []
+
+
+def test_alternate_parser_names_exclude_current() -> None:
+    from parsing_agent.fusion import _alternate_parser_names
+
+    assert "opendataloader-pdf" not in _alternate_parser_names("opendataloader-pdf")
+    assert "docling-pdf" in _alternate_parser_names("opendataloader-pdf")
+    assert set(_alternate_parser_names("docling-pdf")) == {"opendataloader-pdf", "layout-first-pdf"}

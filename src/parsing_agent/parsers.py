@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - optional dependency guard
 
 from parsing_agent.config import WorkflowConfig
 from parsing_agent.filetype import TEXT_SUFFIXES, is_pdf_source as _is_pdf_source, is_text_like_source
+from parsing_agent.docling_parser import DoclingPdfParserAdapter
 from parsing_agent.format_parsers import (
     CsvParserAdapter,
     DataParserAdapter,
@@ -1059,5 +1060,6 @@ def build_default_parser_registry() -> ParserRegistry:
             HtmlParserAdapter(),
             DataParserAdapter(),
             XmlParserAdapter(),
+            DoclingPdfParserAdapter(),
         ]
     )
