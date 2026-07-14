@@ -329,9 +329,9 @@ Plan Distribution
 
 *Source: NOAA Fisheries marine mammal monitoring template (US government work, public domain). Email addresses are the template's `firstname.lastname` placeholders.*
 
-**Original (sheet 1)**
+**Original (sheet 1, full-width rendering)**
 
-<img src="docs/images/formats/xlsx_original.jpg" width="600" alt="NOAA monitoring spreadsheet first sheet">
+<img src="docs/images/formats/xlsx_original.jpg" width="720" alt="NOAA monitoring spreadsheet first sheet">
 
 **Parsed output (excerpt)**
 

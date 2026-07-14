@@ -329,9 +329,9 @@ Plan Distribution
 
 *출처: NOAA Fisheries 해양포유류 모니터링 템플릿 (미국 연방정부 저작물, 퍼블릭 도메인). 이메일 주소는 템플릿의 `firstname.lastname` 플레이스홀더다.*
 
-**원본 (시트 1)**
+**원본 (시트 1, 전체 폭 렌더링)**
 
-<img src="docs/images/formats/xlsx_original.jpg" width="600" alt="NOAA 모니터링 스프레드시트 첫 시트">
+<img src="docs/images/formats/xlsx_original.jpg" width="720" alt="NOAA 모니터링 스프레드시트 첫 시트">
 
 **파싱 결과 (발췌)**
 
