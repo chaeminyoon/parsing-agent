@@ -249,7 +249,7 @@ Stats: 193 chars, 61 words, 13 lines
 
 ## 포맷 갤러리 — 원본 실물과 파싱 결과
 
-아래는 전부 **실제 공개 문서**(미국 EPA·NOAA, ESA, 국내 환경영향평가 공람 문서)를 무편집으로 돌린 결과다.
+아래는 전부 **실제 공개 문서**(미국 EPA·NOAA·NASA, 국내 환경영향평가 공람 문서)를 무편집으로 돌린 결과다.
 포맷마다 원본 실물을 먼저 보이고, 그 아래에 파이프라인의 markdown 출력을 놓았다.
 저장소에는 페이지 렌더링 이미지만 포함하며, 원본 파일 자체는 재배포하지 않는다.
 
@@ -301,28 +301,30 @@ Stats: 193 chars, 61 words, 13 lines
 Plan Distribution
 ```
 
-### PPTX — ESA 기후변화 강의 36슬라이드 · 0.972
+### PPTX — NASA PACE 해색 센서(OCI) 성능 요약 82슬라이드 · 0.962
 
-*출처: ESA 지구관측 교육 자료 "What is Climate Change?" 강의 (Elnaz Neinavaz, University of Twente). 식별을 위해 제목 슬라이드만 게재하며, 저작권은 원저작자에게 있다.*
+*출처: NASA 고다드 우주비행센터, [NTRS 20230002553](https://ntrs.nasa.gov/citations/20230002553) (미국 연방정부 저작물, 퍼블릭 도메인, 배포 등급 PUBLIC).*
 
 **원본 (슬라이드 1)**
 
-<img src="docs/images/formats/pptx_original.jpg" width="600" alt="ESA 기후변화 강의 제목 슬라이드">
+<img src="docs/images/formats/pptx_original.jpg" width="600" alt="NASA PACE 해색 센서 성능 요약 제목 슬라이드">
 
-**파싱 결과 (슬라이드 1–2)**
+**파싱 결과 (슬라이드 1–2 발췌)**
 
 ```markdown
 <!-- slide 1 -->
 
-## What is Climate Change?
-
-- Elnaz Neinavaz, University of Twente
+- The Ocean Color Instrument Performance Summary
 
 <!-- slide 2 -->
 
-## Lecture overview
+## Overview
 
-- Climate
+- Calibration equation, GSD, IFOV, FoR, B2B registration (Gerhard Meister)
+
+- Center wavelengths, spectral sampling, OOB (Gerhard Meister)
+
+- SNR, RVS, polarization, linearity (Jeff McIntire)
 ```
 
 ### XLSX — NOAA 어업 모니터링 · 0.931

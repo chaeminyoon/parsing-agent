@@ -248,7 +248,7 @@ Each sheet gets a heading and becomes a markdown table (sharedStrings, inline st
 
 ## Format gallery — originals vs parsed output
 
-Everything below is an unedited run on **real public documents** (US EPA, NOAA, ESA, and a
+Everything below is an unedited run on **real public documents** (US EPA, NOAA, NASA, and a
 Korean EIA disclosure document). For each format: how the original looks, then the pipeline's
 markdown output. Only page renderings are included here — the source files themselves are not
 redistributed in this repository.
@@ -301,28 +301,30 @@ redistributed in this repository.
 Plan Distribution
 ```
 
-### PPTX — ESA climate lecture, 36 slides · 0.972
+### PPTX — NASA PACE Ocean Color Instrument performance summary, 82 slides · 0.962
 
-*Source: ESA Earth observation education material, "What is Climate Change?" lecture (Elnaz Neinavaz, University of Twente). Title slide shown for identification; © the respective authors.*
+*Source: NASA Goddard Space Flight Center, [NTRS 20230002553](https://ntrs.nasa.gov/citations/20230002553) (US government work, public domain, distribution PUBLIC).*
 
 **Original (slide 1)**
 
-<img src="docs/images/formats/pptx_original.jpg" width="600" alt="Title slide of the ESA climate change lecture">
+<img src="docs/images/formats/pptx_original.jpg" width="600" alt="Title slide of the NASA PACE Ocean Color Instrument performance summary">
 
-**Parsed output (slides 1–2)**
+**Parsed output (slides 1–2, excerpt)**
 
 ```markdown
 <!-- slide 1 -->
 
-## What is Climate Change?
-
-- Elnaz Neinavaz, University of Twente
+- The Ocean Color Instrument Performance Summary
 
 <!-- slide 2 -->
 
-## Lecture overview
+## Overview
 
-- Climate
+- Calibration equation, GSD, IFOV, FoR, B2B registration (Gerhard Meister)
+
+- Center wavelengths, spectral sampling, OOB (Gerhard Meister)
+
+- SNR, RVS, polarization, linearity (Jeff McIntire)
 ```
 
 ### XLSX — NOAA fisheries monitoring · 0.931
