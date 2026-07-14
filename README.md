@@ -480,9 +480,9 @@ graph TB
 
 ## Benchmarks
 
-The benchmark compares the repaired workflow against parser outputs on real environmental assessment PDFs. The internal score is optimized by this project, so human-labeled validation remains the stronger check; the `golden/` directory contains that protocol.
+Two kinds of measurements. The grader is this project's own deterministic metric, which Parse-Everything optimizes internally — read the comparison as directional, not neutral. Human-labeled validation is the stronger check; the `golden/` directory contains that protocol.
 
-Repair-loop value:
+Repair-loop value on controlled damage scenarios (the round-1 score is the plain parser output):
 
 | Scenario | Parser output | Final loop output |
 |---|---:|---:|
@@ -490,15 +490,19 @@ Repair-loop value:
 | Half-missing body text | 0.406 | 0.930 |
 | Injected bad repair | 0.862 | 0.862 with rollback |
 
-Head-to-head parser comparison:
+Head-to-head against open-source parsers on three real Korean environmental impact assessment PDFs, all engines scored with the same metric (measured 2026-07-02):
 
 | Engine | Average | Consultation doc | Project overview doc | Target-area doc | Time/document |
 |---|---:|---:|---:|---:|---:|
-| parsing-agent | 0.732 | 0.812 | 0.630 | 0.755 | 186-260s |
-| markitdown | 0.666 | 0.785 | 0.680 | 0.531 | 0.1-1.4s |
-| docling | 0.657 | 0.783 | 0.426 | 0.761 | 5-19s |
-| opendataloader | 0.655 | 0.744 | 0.583 | 0.638 | 1.1-5.3s |
-| pymupdf4llm | 0.358 | 0.405 | 0.000 | 0.669 | 0.7-16.5s |
+| **Parse-Everything** | **0.732** | **0.812** | 0.630 | 0.755 | 186–260s |
+| [markitdown](https://github.com/microsoft/markitdown) | 0.666 | 0.785 | **0.680** | 0.531 | 0.1–1.4s |
+| [docling](https://github.com/docling-project/docling) | 0.657 | 0.783 | 0.426 | **0.761** | 5–77s |
+| [opendataloader-pdf](https://github.com/opendataloader-project/opendataloader-pdf) | 0.655 | 0.744 | 0.583 | 0.638 | 1.1–5.3s |
+| [pymupdf4llm](https://github.com/pymupdf/pymupdf4llm) | 0.358 | 0.405 | 0.000 | 0.669 | 0.7–16.5s |
+
+The per-document winner differs every time: Parse-Everything takes the consultation doc, markitdown the project overview, docling the target-area doc. Parse-Everything leads on average not because of its peaks but because its floor (0.630) is the highest — single-pass parsers can collapse to 0.0 on the wrong document. What the repair loop sells is the floor.
+
+These numbers predate the 2026-07-13 cross-parser fusion and TOC-restoration work; keyless re-measurements after those landed show further gains on the same metric (for example NOAA NDBC guide 0.582 → 0.856, NOAA CO-OPS spec 0.676 → 0.765 — see [benchmarks/results/RESULTS.md](benchmarks/results/RESULTS.md)). Per-document detail for the table above is in the same file.
 
 Reproduce:
 
