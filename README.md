@@ -246,6 +246,121 @@ Each sheet gets a heading and becomes a markdown table (sharedStrings, inline st
 ```
 
 
+## Format gallery — originals vs parsed output
+
+Everything below is an unedited run on **real public documents** (EPA, NOAA, ESA, Suwon City).
+Original renderings sit next to the pipeline's markdown output.
+
+### PDF — Hwaseong EIA summary · 0.719 (keyless) / 0.817 (full loop)
+
+<table><tr>
+<td width="46%" valign="top"><b>Original (p.4)</b><br><img src="docs/images/formats/pdf_original.jpg" width="100%"></td>
+<td valign="top"><b>Parsed output (excerpt)</b>
+<pre>화성진안 공공주택지구 조성사업
+
+환경영향평가서(초안) 요약문
+
+2025. 09
+
+![image 1](&lt;eia_hwaseong_images/imageFile1.png&gt;)
+
+# 한국토지주택공사
+
+## 화성진안 공공주택지구 조성사업 환 경 영향 평 가서 ( 초 안 ) 요 약문
+</pre></td>
+</tr></table>
+
+### DOCX — EPA emergency response plan template · 0.912
+
+<table><tr>
+<td width="46%" valign="top"><b>Original (page 1)</b><br><img src="docs/images/formats/docx_original.jpg" width="100%"></td>
+<td valign="top"><b>Parsed output (excerpt)</b>
+<pre>
+| PWSID | 123456 |
+| --- | --- |
+| Street Address | 12 Main Street |
+| City, State, Zip Code | Anytown, XX, 98765 |
+| Phone number | 555-555-5555 |
+| Population Served | 7,500 |
+| Prepared by | April Smith |
+| Reviewed by | Joe Jones |
+| Date completed | MM/DD/YYYY |
+
+Plan Distribution</pre></td>
+</tr></table>
+
+### PPTX — ESA climate lecture, 36 slides · 0.972
+
+<table><tr>
+<td width="46%" valign="top"><b>Original (slide 1)</b><br><img src="docs/images/formats/pptx_original.jpg" width="100%"></td>
+<td valign="top"><b>Parsed output (slides 1–2)</b>
+<pre>&lt;!-- slide 1 --&gt;
+
+## What is Climate Change?
+
+- Elnaz Neinavaz, University of Twente
+
+&lt;!-- slide 2 --&gt;
+
+## Lecture overview
+
+- Climate
+</pre></td>
+</tr></table>
+
+### XLSX — NOAA fisheries monitoring · 0.931
+
+<table><tr>
+<td width="46%" valign="top"><b>Original (sheet 1)</b><br><img src="docs/images/formats/xlsx_original.jpg" width="100%"></td>
+<td valign="top"><b>Parsed output (excerpt)</b>
+<pre>## Agency Contact Information
+
+| Reason for Contact | Contact Information |
+| --- | --- |
+| Consultation Questions | Consultation Biologist: firstname.lastname@noaa.gov |
+| IHA Questions | Point of Contact: firstname.lastname@noaa.gov |
+| Reports &amp; Data Submittal | IHA POC: firstname.lastname@noaa.gov |
+| Reports &amp; Data Submittal | AKR.section7@noaa.gov |
+| Stranded, Injured, or Dead Marine Mammal | Stranding Hotline (24/7 coverage) 877-925-7773 |</pre></td>
+</tr></table>
+
+### XML — NDBC station catalog, 1,359 entries · 1.000
+
+<table><tr>
+<td width="50%" valign="top"><b>Original (raw XML)</b>
+<pre>&lt;?xml version=&quot;1.0&quot; encoding=&quot;utf-8&quot;?&gt;&lt;stations created=&quot;2026-07-13T08:45:02UTC&quot; count=&quot;1359&quot;&gt;
+  &lt;!--Site Elevation (elev attribute), when present, is reported in meters above mean sea level.--&gt;
+  &lt;station id=&quot;13001&quot; lat=&quot;12&quot; lon=&quot;-23&quot; elev=&quot;0&quot; name=&quot;NE Extension&quot; owner=&quot;Prediction and Research
+  &lt;station id=&quot;13002&quot; lat=&quot;21&quot; lon=&quot;-23&quot; elev=&quot;0&quot; name=&quot;NE Extension&quot; owner=&quot;Prediction and Research</pre></td>
+<td valign="top"><b>Parsed — repeated elements as a table</b>
+<pre>- **stations (created=&quot;2026-07-13T08:45:02UTC&quot; count=&quot;1359&quot;):**
+
+| id | lat | lon | elev | name | owner | pgm | type | met | currents | waterquality | dart |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 13001 | 12 | -23 | 0 | NE Extension | Prediction and Research Moored Array in the Atlantic | International Partners | buoy | n | n | n | n |
+| 13002 | 21 | -23 | 0 | NE Extension | Prediction and Research Moored Array in the Atlantic | International Partners | buoy | n | n | n | n |
+| 13008 | 15 | -38 | 0 | Reggae | Prediction and Research Moored Array in the Atlantic | International Partners | buoy | n | n | n | n |</pre></td>
+</tr></table>
+
+### CSV — NOAA tide observations, 1,682 rows · 1.000
+
+<table><tr>
+<td width="50%" valign="top"><b>Original (raw CSV)</b>
+<pre>Date Time, Water Level, Sigma, O or I (for verified), F, R, L, Quality 
+2026-07-01 00:00,1.25,0.071,0,0,0,0,p
+2026-07-01 00:06,1.239,0.074,0,0,0,0,p
+2026-07-01 00:12,1.234,0.067,1,0,0,0,p
+2026-07-01 00:18,1.222,0.076,1,0,0,0,p</pre></td>
+<td valign="top"><b>Parsed output</b>
+<pre>| Date Time | Water Level | Sigma | O or I (for verified) | F | R | L | Quality |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-07-01 00:00 | 1.25 | 0.071 | 0 | 0 | 0 | 0 | p |
+| 2026-07-01 00:06 | 1.239 | 0.074 | 0 | 0 | 0 | 0 | p |
+| 2026-07-01 00:12 | 1.234 | 0.067 | 1 | 0 | 0 | 0 | p |
+| 2026-07-01 00:18 | 1.222 | 0.076 | 1 | 0 | 0 | 0 | p |</pre></td>
+</tr></table>
+
+
 ## Workflow
 
 ```mermaid
