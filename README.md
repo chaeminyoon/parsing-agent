@@ -23,6 +23,8 @@ The project was shaped around Korean environmental impact assessment reports, wh
 - Combines deterministic metrics with an LLM judge for quality checks.
 - Routes repairs by cost: free heuristics first, LLM text repair only when useful, and vision repair for damaged tables.
 - Re-scores every repair and rolls back score regressions.
+- Fuses candidates from a multi-parser pool (opendataloader-pdf, layout-first PyMuPDF, optional docling) — alternate table blocks are adopted only when they survive verification.
+- Uses the document's own PDF bookmarks (TOC) as a structure floor, restoring declared headings and page-marker positions.
 - Keeps node contracts structured so free-form judge text does not drive machine routing.
 - Validates vision table repair against real text/cell evidence and rejects mismatched patches.
 - Tracks LLM usage by stage, including calls, retries, latency, and tokens.
@@ -65,7 +67,7 @@ uv run pytest
 
 ## Usage Scenarios — captured output
 
-All five scenarios below are **unedited results of actual runs** on the inputs bundled in
+All six scenarios below are **unedited results of actual runs** on the inputs bundled in
 `examples/`. Reproducible without an API key: `uv run parsing-agent examples/<file>`.
 
 ### 1. PDF report — ruled tables to markdown
@@ -452,7 +454,7 @@ graph TB
         HTTP --> V[table reconstruction]
     end
     subgraph DocumentProcessing["Document Processing"]
-        ODL[opendataloader-pdf]
+        ODL[parser pool<br/>opendataloader · layout-first · docling]
         FITZ[PyMuPDF]
         OCR[Surya OCR]
     end
@@ -473,7 +475,7 @@ graph TB
 | Orchestration | LangGraph | Six-node state machine with conditional repair edges and typed state contracts |
 | LLM calls | OpenAI-compatible REST | Judge, text repair, and vision reconstruction through one retry/accounting path |
 | PDF handling | PyMuPDF | Rendering, visual grounding, table detection, and crop generation |
-| Base parser | opendataloader-pdf | Java parser behind an adapter registry |
+| Parser pool | opendataloader-pdf, layout-first PyMuPDF, docling (optional) | Adapter registry; cross-parser fusion adopts verified candidate blocks |
 | OCR | Surya subprocess | Optional scanned-page support with fail-open behavior |
 | Tracing | LangSmith | Structured node summaries without sending document bodies to traces |
 | Tests | pytest, uv, GitHub Actions | Mock-based tests that run without API keys |
@@ -515,20 +517,33 @@ uv run python benchmarks/run_head_to_head.py data/*.pdf
 
 ```text
 src/parsing_agent/
+├── cli.py             # command-line entry point
+├── config.py          # PARSING_AGENT_* environment configuration
 ├── workflow.py        # LangGraph state machine, rollback, attempt tracking
 ├── workflow_state.py  # node-to-node state/plan dataclasses
-├── tracing.py         # structured LangSmith trace summaries
+├── models.py          # core dataclasses (DocumentSource, ParseCandidate)
+├── interfaces.py      # parser/evaluator/judge abstract contracts
+├── ingestion.py       # media-type detection, source text extraction
+├── parsers.py         # PDF parser adapters + registry
+├── docling_parser.py  # optional docling adapter for the fusion pool
+├── fusion.py          # cross-parser fusion: candidate union, verified table adoption
+├── format_parsers.py  # docx/pptx/xlsx/odt/csv/html/json/yaml/xml adapters (stdlib OOXML)
+├── ocr.py             # Surya OCR subprocess path (fail-open)
 ├── evaluation.py      # deterministic metrics, judge integration, issue taxonomy
 ├── judge.py           # multimodal LLM judge with retry and JSON fallback
+├── table_metrics.py   # TEDS-lite cell-level table similarity
+├── toc.py             # PDF bookmark (TOC) structure verdict and restoration
 ├── repair.py          # heuristic repair and repair-target diagnosis
 ├── llm_repair.py      # issue-level LLM text repair
 ├── visual_repair.py   # vision calls, crop strategy, patch orchestration
 ├── visual_tasks.py    # visual-repair task construction from findings/metadata
 ├── visual_tables.py   # table text primitives (HTML→markdown, block patching)
-├── table_metrics.py   # TEDS-lite cell-level table similarity
+├── enrichment.py      # LLM image-caption enrichment
 ├── llm_usage.py       # stage-level LLM usage accounting
-├── parsers.py         # PDF parser adapters + registry
-├── format_parsers.py  # docx/pptx/csv/html/json/yaml structured adapters (stdlib OOXML)
+├── monitoring.py      # judge feedback log and prompt hints
+├── reporting.py       # JSON decision-report writer
+├── tracing.py         # structured LangSmith trace summaries
+├── graph_export.py    # workflow graph diagram export
 ├── filetype.py        # single source of truth for media-type/suffix checks
 └── textutil.py        # encoding-fallback reads, NFC normalization, markdown tables
 

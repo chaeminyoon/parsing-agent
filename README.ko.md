@@ -24,6 +24,8 @@
 - 결정적 메트릭 + 멀티모달 LLM judge로 품질 게이트를 통과할 때까지 수리 루프를 돈다 (최대 3번)
 - 수리 전략이 3단계다: 무료 휴리스틱 → 정체된 이슈만 LLM 승격 → 깨진 표는 비전 모델로 재구성
 - 수리마다 재채점하고, 점수가 떨어지면 롤백한다. 가장 좋은 점수를 가진 값이 결과가 된다.
+- 파서 풀(opendataloader-pdf·layout-first·docling 옵션)의 후보를 융합한다. 다른 엔진의 표 블록은 검증을 통과할 때만 채택되고, 악화되면 자동 회수된다
+- PDF 북마크(TOC)를 구조의 하한으로 쓴다 — 문서가 스스로 선언한 목차 제목을 복원하고 페이지 마커 위치를 되살린다
 - 노드 사이에는 이슈와 수치만 오간다. judge의 문장은 사람용 리포트에만 남는다
 - 비전 수리 결과는 실제 텍스트와 셀 단위로 대조된다. 엉뚱한 표를 재구성하면 `content_mismatch`로 거부
 - 모든 실패에 사유가 남는다: `low_confidence(0.2)`, `patch_target_not_found`, `recover_exception: TimeoutError` 이런형태로
@@ -66,7 +68,7 @@ uv run pytest
 
 ## 사용 시나리오 — 실측 출력
 
-아래 다섯 시나리오는 전부 `examples/`에 동봉된 입력으로 **방금 실행한 무편집 결과**다.
+아래 여섯 시나리오는 전부 `examples/`에 동봉된 입력으로 **방금 실행한 무편집 결과**다.
 API 키 없이 재현된다: `uv run parsing-agent examples/<파일>`.
 
 ### 1. PDF 보고서 — 괘선 표를 마크다운으로
@@ -456,7 +458,7 @@ graph TB
         HTTP --> V[표 재구성<br/>gpt-5-mini vision]
     end
     subgraph 문서 처리
-        ODL[opendataloader-pdf<br/>Java 파서]
+        ODL[파서 풀<br/>opendataloader · layout-first · docling]
         FITZ[PyMuPDF<br/>렌더링 · 표 감지 · crop]
         OCR[Surya OCR<br/>subprocess]
     end
@@ -477,10 +479,10 @@ graph TB
 | 오케스트레이션 | LangGraph | 6개 노드 상태 머신. 조건부 엣지로 수리 루프를 돌리고, 상태는 `TypedDict`로 노드 간 계약을 고정 |
 | LLM 호출 | OpenAI 호환 REST (urllib) | judge, 텍스트 수리, 비전 재구성이 같은 HTTP 경로를 탄다. base URL만 바꾸면 호환 서버로 교체 가능 |
 | PDF 처리 | PyMuPDF | 페이지 렌더링(judge 그라운딩, 비전 crop), 괘선 표 감지, TEDS-lite 기준 그리드 추출 |
-| 기본 파서 | opendataloader-pdf | Java 기반. 파서 어댑터 레지스트리 뒤에 있어서 다른 파서로 교체하거나 추가할 수 있다 |
+| 파서 풀 | opendataloader-pdf · layout-first PyMuPDF · docling(옵션) | 어댑터 레지스트리 뒤의 융합 풀. 교차 파서 융합이 검증 통과한 후보 블록만 채택한다 |
 | OCR | Surya (subprocess) | 스캔 페이지용. 실패해도 파이프라인은 계속 간다 (fail-open) |
 | 트레이싱 | LangSmith | 노드 입출력을 구조화 요약으로만 내보낸다. 문서 원문은 트레이스에 나가지 않는다 |
-| 테스트/패키징 | pytest, uv, GitHub Actions | 248개 테스트가 1초 안에 돈다. 전부 모킹 기반이라 API 키 없이 CI에서 돈다 |
+| 테스트/패키징 | pytest, uv, GitHub Actions | 288개 테스트, 전부 모킹 기반이라 API 키 없이 CI에서 돈다 |
 
 openai SDK 대신 urllib를 직접 쓰는 건 의도한 선택이다. 재시도 정책과 비용 계측을 호출 지점 한 곳(`_call_with_retry`)에서 통제하고 싶었고, SDK 버전 업그레이드에 끌려다니고 싶지 않았다. LangGraph를 쓴 이유는 반대로 직접 만들기 싫어서다. 조건부 엣지와 상태 병합을 손으로 짜면 그게 또 하나의 버그 표면이 된다.
 
@@ -519,7 +521,7 @@ uv run python benchmarks/run_head_to_head.py data/*.pdf
 
 ## 골든셋이 벌써 잡은 것
 
-`golden/`에 사람 라벨링 프로토콜이 있고, 지금 6개 문서 중 2개에 라벨이 달렸다. 라벨 2건이 이미 값을 했다.
+`golden/`에 사람 라벨링 프로토콜이 있고, 지금 16개 문서 중 12개에 사람 라벨이 달렸다. 초기 라벨 2건이 이미 값을 했다.
 
 첫 라벨이 환각을 잡았다. judge가 인쇄된 쪽번호(44)를 PDF 페이지 번호로 착각해 보고했고, 그 페이지엔 라벨이 없으니 crop이 아무 표나 집었고, vision 모델은 그 잘못된 crop을 충실히 재구성했고, 라벨 존재만 보는 검증은 통과시켰다. 결과: 토지이용 표 자리에 정수장 표. 사람 눈만 잡아냈다. 위의 세 겹 방어가 이 사고의 직접 결과물이고, 같은 문서를 재실행해서 올바른 표가 복구되는 것까지 확인했다.
 
@@ -529,26 +531,39 @@ uv run python benchmarks/run_head_to_head.py data/*.pdf
 
 ```
 src/parsing_agent/
+├── cli.py             # CLI 진입점
+├── config.py          # PARSING_AGENT_* 환경변수 설정
 ├── workflow.py        # LangGraph 상태 머신, 롤백, 시도 추적
 ├── workflow_state.py  # 노드 간 상태/계획 dataclass
-├── tracing.py         # LangSmith 트레이스 구조화 요약
+├── models.py          # 핵심 dataclass (DocumentSource, ParseCandidate)
+├── interfaces.py      # 파서/평가기/judge 추상 계약
+├── ingestion.py       # 미디어 타입 판별, 원문 텍스트 추출
+├── parsers.py         # PDF 파서 어댑터 + 레지스트리
+├── docling_parser.py  # docling 어댑터 (옵션, 융합 풀 편입)
+├── fusion.py          # 교차 파서 융합: 후보 합집합, 검증된 표 채택
+├── format_parsers.py  # docx/pptx/xlsx/odt/csv/html/json/yaml/xml 어댑터 (stdlib OOXML)
+├── ocr.py             # Surya OCR subprocess 경로 (fail-open)
 ├── evaluation.py      # 결정적 메트릭, judge 통합, 이슈 분류
 ├── judge.py           # 멀티모달 LLM judge (재시도, JSON 폴백, fail-open)
+├── table_metrics.py   # TEDS-lite 셀 단위 표 유사도
+├── toc.py             # PDF 북마크(TOC) 구조 심판·복원
 ├── repair.py          # 휴리스틱 수리, 수리 대상 진단
 ├── llm_repair.py      # 이슈 단위 LLM 텍스트 수리
 ├── visual_repair.py   # 비전 호출, crop 전략, 패치 오케스트레이션
 ├── visual_tasks.py    # 파인딩/메타데이터 기반 visual repair 태스크 구성
 ├── visual_tables.py   # 표 텍스트 프리미티브 (HTML→마크다운, 블록 치환)
-├── table_metrics.py   # TEDS-lite 셀 단위 표 유사도
+├── enrichment.py      # LLM 이미지 캡션 보강
 ├── llm_usage.py       # 스테이지별 LLM 비용 집계
-├── parsers.py         # PDF 파서 어댑터 + 레지스트리
-├── format_parsers.py  # docx/pptx/csv/html/json/yaml 구조화 어댑터 (stdlib OOXML)
+├── monitoring.py      # judge 피드백 로그·프롬프트 힌트
+├── reporting.py       # JSON 의사결정 리포트 작성
+├── tracing.py         # LangSmith 트레이스 구조화 요약
+├── graph_export.py    # 워크플로 그래프 다이어그램 내보내기
 ├── filetype.py        # 파일 타입 판별 단일 소스
 └── textutil.py        # 인코딩 폴백 읽기·NFC 정규화·마크다운 표 렌더
 
 benchmarks/            # 외부 파서 head-to-head
 golden/                # 사람 라벨 골든셋 (라벨링 가이드, 상관 분석)
-tests/                 # 248 tests
+tests/                 # 288 tests
 ```
 
 ## 로드맵
