@@ -8,3 +8,4 @@ judge_feedback.jsonl
 data/
 *.egg-info/
 benchmarks/results/work/
+._*

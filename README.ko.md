@@ -249,34 +249,45 @@ Stats: 193 chars, 61 words, 13 lines
 
 ## 포맷 갤러리 — 원본 실물과 파싱 결과
 
-아래는 전부 **실제 공개 문서**(EPA·NOAA·ESA·수원시)를 무편집으로 돌린 결과다.
-원본 렌더링과 파이프라인 출력(markdown)을 나란히 놓았다.
+아래는 전부 **실제 공개 문서**(미국 EPA·NOAA, ESA, 국내 환경영향평가 공람 문서)를 무편집으로 돌린 결과다.
+포맷마다 원본 실물을 먼저 보이고, 그 아래에 파이프라인의 markdown 출력을 놓았다.
+저장소에는 페이지 렌더링 이미지만 포함하며, 원본 파일 자체는 재배포하지 않는다.
 
 ### PDF — 화성진안 환경영향평가 요약문 · 0.719(키리스)/0.817(풀루프)
 
-<table><tr>
-<td width="46%" valign="top"><b>원본 (p4)</b><br><img src="docs/images/formats/pdf_original.jpg" width="100%"></td>
-<td valign="top"><b>파싱 결과 (발췌)</b>
-<pre>화성진안 공공주택지구 조성사업
+*출처: LH 화성진안 공공주택지구 환경영향평가서(초안) 요약문 — 공람용 공개 문서 ([eiass.go.kr](https://www.eiass.go.kr)).*
+
+**원본 (p4)**
+
+<img src="docs/images/formats/pdf_original.jpg" width="480" alt="사업지구 위치도와 현황 사진이 실린 요약문 페이지">
+
+**파싱 결과 (발췌)**
+
+```markdown
+화성진안 공공주택지구 조성사업
 
 환경영향평가서(초안) 요약문
 
 2025. 09
 
-![image 1](&lt;eia_hwaseong_images/imageFile1.png&gt;)
+![image 1](<eia_hwaseong_images/imageFile1.png>)
 
 # 한국토지주택공사
 
 ## 화성진안 공공주택지구 조성사업 환 경 영향 평 가서 ( 초 안 ) 요 약문
-</pre></td>
-</tr></table>
+```
 
 ### DOCX — EPA 비상대응계획 템플릿 · 0.912
 
-<table><tr>
-<td width="46%" valign="top"><b>원본 (1쪽)</b><br><img src="docs/images/formats/docx_original.jpg" width="100%"></td>
-<td valign="top"><b>파싱 결과 (발췌)</b>
-<pre>
+*출처: 미국 EPA 비상대응계획 템플릿 (미국 연방정부 저작물, 퍼블릭 도메인). 아래 이름·번호는 전부 템플릿 자체의 예시 값이다.*
+
+**원본 (1쪽)**
+
+<img src="docs/images/formats/docx_original.jpg" width="480" alt="시설 정보 표가 있는 EPA 템플릿 첫 페이지">
+
+**파싱 결과 (발췌)**
+
+```markdown
 | PWSID | 123456 |
 | --- | --- |
 | Street Address | 12 Main Street |
@@ -287,79 +298,104 @@ Stats: 193 chars, 61 words, 13 lines
 | Reviewed by | Joe Jones |
 | Date completed | MM/DD/YYYY |
 
-Plan Distribution</pre></td>
-</tr></table>
+Plan Distribution
+```
 
 ### PPTX — ESA 기후변화 강의 36슬라이드 · 0.972
 
-<table><tr>
-<td width="46%" valign="top"><b>원본 (슬라이드 1)</b><br><img src="docs/images/formats/pptx_original.jpg" width="100%"></td>
-<td valign="top"><b>파싱 결과 (슬라이드 1–2)</b>
-<pre>&lt;!-- slide 1 --&gt;
+*출처: ESA 지구관측 교육 자료 "What is Climate Change?" 강의 (Elnaz Neinavaz, University of Twente). 식별을 위해 제목 슬라이드만 게재하며, 저작권은 원저작자에게 있다.*
+
+**원본 (슬라이드 1)**
+
+<img src="docs/images/formats/pptx_original.jpg" width="600" alt="ESA 기후변화 강의 제목 슬라이드">
+
+**파싱 결과 (슬라이드 1–2)**
+
+```markdown
+<!-- slide 1 -->
 
 ## What is Climate Change?
 
 - Elnaz Neinavaz, University of Twente
 
-&lt;!-- slide 2 --&gt;
+<!-- slide 2 -->
 
 ## Lecture overview
 
 - Climate
-</pre></td>
-</tr></table>
+```
 
 ### XLSX — NOAA 어업 모니터링 · 0.931
 
-<table><tr>
-<td width="46%" valign="top"><b>원본 (시트 1)</b><br><img src="docs/images/formats/xlsx_original.jpg" width="100%"></td>
-<td valign="top"><b>파싱 결과 (발췌)</b>
-<pre>## Agency Contact Information
+*출처: NOAA Fisheries 해양포유류 모니터링 템플릿 (미국 연방정부 저작물, 퍼블릭 도메인). 이메일 주소는 템플릿의 `firstname.lastname` 플레이스홀더다.*
+
+**원본 (시트 1)**
+
+<img src="docs/images/formats/xlsx_original.jpg" width="600" alt="NOAA 모니터링 스프레드시트 첫 시트">
+
+**파싱 결과 (발췌)**
+
+```markdown
+## Agency Contact Information
 
 | Reason for Contact | Contact Information |
 | --- | --- |
 | Consultation Questions | Consultation Biologist: firstname.lastname@noaa.gov |
 | IHA Questions | Point of Contact: firstname.lastname@noaa.gov |
-| Reports &amp; Data Submittal | IHA POC: firstname.lastname@noaa.gov |
-| Reports &amp; Data Submittal | AKR.section7@noaa.gov |
-| Stranded, Injured, or Dead Marine Mammal | Stranding Hotline (24/7 coverage) 877-925-7773 |</pre></td>
-</tr></table>
+| Reports & Data Submittal | IHA POC: firstname.lastname@noaa.gov |
+| Reports & Data Submittal | AKR.section7@noaa.gov |
+| Stranded, Injured, or Dead Marine Mammal | Stranding Hotline (24/7 coverage) 877-925-7773 |
+```
 
 ### XML — NDBC 관측소 카탈로그 1,359개 · 1.000
 
-<table><tr>
-<td width="50%" valign="top"><b>원본 (원시 XML)</b>
-<pre>&lt;?xml version=&quot;1.0&quot; encoding=&quot;utf-8&quot;?&gt;&lt;stations created=&quot;2026-07-13T08:45:02UTC&quot; count=&quot;1359&quot;&gt;
-  &lt;!--Site Elevation (elev attribute), when present, is reported in meters above mean sea level.--&gt;
-  &lt;station id=&quot;13001&quot; lat=&quot;12&quot; lon=&quot;-23&quot; elev=&quot;0&quot; name=&quot;NE Extension&quot; owner=&quot;Prediction and Research
-  &lt;station id=&quot;13002&quot; lat=&quot;21&quot; lon=&quot;-23&quot; elev=&quot;0&quot; name=&quot;NE Extension&quot; owner=&quot;Prediction and Research</pre></td>
-<td valign="top"><b>파싱 결과 — 반복 요소가 표로</b>
-<pre>- **stations (created=&quot;2026-07-13T08:45:02UTC&quot; count=&quot;1359&quot;):**
+*출처: [NOAA NDBC](https://www.ndbc.noaa.gov) 활성 관측소 카탈로그 (미국 연방정부 저작물, 퍼블릭 도메인).*
+
+**원본 (원시 XML)**
+
+```xml
+<?xml version="1.0" encoding="utf-8"?><stations created="2026-07-13T08:45:02UTC" count="1359">
+  <!--Site Elevation (elev attribute), when present, is reported in meters above mean sea level.-->
+  <station id="13001" lat="12" lon="-23" elev="0" name="NE Extension" owner="Prediction and Research
+  <station id="13002" lat="21" lon="-23" elev="0" name="NE Extension" owner="Prediction and Research
+```
+
+**파싱 결과 — 반복 요소가 표로**
+
+```markdown
+- **stations (created="2026-07-13T08:45:02UTC" count="1359"):**
 
 | id | lat | lon | elev | name | owner | pgm | type | met | currents | waterquality | dart |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 13001 | 12 | -23 | 0 | NE Extension | Prediction and Research Moored Array in the Atlantic | International Partners | buoy | n | n | n | n |
 | 13002 | 21 | -23 | 0 | NE Extension | Prediction and Research Moored Array in the Atlantic | International Partners | buoy | n | n | n | n |
-| 13008 | 15 | -38 | 0 | Reggae | Prediction and Research Moored Array in the Atlantic | International Partners | buoy | n | n | n | n |</pre></td>
-</tr></table>
+| 13008 | 15 | -38 | 0 | Reggae | Prediction and Research Moored Array in the Atlantic | International Partners | buoy | n | n | n | n |
+```
 
 ### CSV — NOAA 조위 관측 1,682행 · 1.000
 
-<table><tr>
-<td width="50%" valign="top"><b>원본 (원시 CSV)</b>
-<pre>Date Time, Water Level, Sigma, O or I (for verified), F, R, L, Quality 
+*출처: [NOAA CO-OPS](https://tidesandcurrents.noaa.gov) 수위 관측 자료, 샌프란시스코 관측소 (미국 연방정부 저작물, 퍼블릭 도메인).*
+
+**원본 (원시 CSV)**
+
+```text
+Date Time, Water Level, Sigma, O or I (for verified), F, R, L, Quality 
 2026-07-01 00:00,1.25,0.071,0,0,0,0,p
 2026-07-01 00:06,1.239,0.074,0,0,0,0,p
 2026-07-01 00:12,1.234,0.067,1,0,0,0,p
-2026-07-01 00:18,1.222,0.076,1,0,0,0,p</pre></td>
-<td valign="top"><b>파싱 결과</b>
-<pre>| Date Time | Water Level | Sigma | O or I (for verified) | F | R | L | Quality |
+2026-07-01 00:18,1.222,0.076,1,0,0,0,p
+```
+
+**파싱 결과**
+
+```markdown
+| Date Time | Water Level | Sigma | O or I (for verified) | F | R | L | Quality |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-07-01 00:00 | 1.25 | 0.071 | 0 | 0 | 0 | 0 | p |
 | 2026-07-01 00:06 | 1.239 | 0.074 | 0 | 0 | 0 | 0 | p |
 | 2026-07-01 00:12 | 1.234 | 0.067 | 1 | 0 | 0 | 0 | p |
-| 2026-07-01 00:18 | 1.222 | 0.076 | 1 | 0 | 0 | 0 | p |</pre></td>
-</tr></table>
+| 2026-07-01 00:18 | 1.222 | 0.076 | 1 | 0 | 0 | 0 | p |
+```
 
 
 ## 동작 방식
